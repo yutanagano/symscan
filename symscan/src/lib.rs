@@ -28,7 +28,7 @@ use std::fmt::Display;
 use std::hash::{BuildHasher, Hasher};
 use std::mem::MaybeUninit;
 use std::ops::Range;
-use std::{ptr, str, u8, usize};
+use std::{ptr, str};
 use thiserror;
 use utils::{CrossIndex, MaxDistance};
 
