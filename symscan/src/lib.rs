@@ -523,7 +523,7 @@ impl CachedRef {
             .map(|(r, s)| (&q_idx_store[r], s))
             .collect_vec();
 
-        let candidates = get_hit_candidates_from_cis_cross(&convergence_groups);
+        let candidates = get_hit_candidates_across(&convergence_groups);
         let dists = self.compute_dists_partially_cached(&candidates, query, max_distance);
 
         Ok(collect_true_hits(&candidates, &dists, max_distance))
@@ -607,7 +607,7 @@ impl CachedRef {
             convergence_groups
         };
 
-        let candidates = get_hit_candidates_from_cis_cross(&convergence_groups);
+        let candidates = get_hit_candidates_across(&convergence_groups);
         let dists = self.compute_dists_fully_cached(&candidates, query, max_distance);
 
         Ok(collect_true_hits(&candidates, &dists, max_distance))
@@ -967,7 +967,7 @@ pub fn get_neighbors_across(
 
     debug_assert_eq!(remaining.len(), 0);
 
-    let candidates = get_hit_candidates_from_cis_cross(&convergent_chunks);
+    let candidates = get_hit_candidates_across(&convergent_chunks);
     let dists = compute_dists(&candidates, &query, &reference, max_distance);
 
     Ok(collect_true_hits(&candidates, &dists, max_distance))
@@ -1178,7 +1178,7 @@ fn get_hit_candidates_within(convergent_indices: &[impl AsRef<[u32]> + Sync]) ->
     hit_candidates
 }
 
-fn get_hit_candidates_from_cis_cross<T, U>(convergent_indices: &[(T, U)]) -> Vec<(u32, u32)>
+fn get_hit_candidates_across<T, U>(convergent_indices: &[(T, U)]) -> Vec<(u32, u32)>
 where
     T: AsRef<[u32]> + Sync,
     U: AsRef<[u32]> + Sync,
