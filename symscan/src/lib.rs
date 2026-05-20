@@ -29,7 +29,6 @@ use std::hash::{BuildHasher, Hasher};
 use std::mem::MaybeUninit;
 use std::ops::Range;
 use std::{ptr, str};
-use thiserror;
 use utils::{CrossIndex, MaxDistance};
 
 /// Used to specify the source of certain [`Error`] variants.
@@ -235,6 +234,11 @@ impl NeighborPairs {
     pub fn len(&self) -> usize {
         self.row.len()
     }
+
+    /// Returns true if no neighbors were detected.
+    pub fn is_empty(&self) -> bool {
+        self.row.is_empty()
+    }
 }
 
 /// A struct for memoizing the deletion variant calculations for a string collection.
@@ -383,10 +387,8 @@ impl CachedRef {
             (convergent_indices, convergence_groups)
         };
 
-        let mut variant_map = HashMap::with_capacity_and_hasher(
-            convergence_groups.len(),
-            IdentityHasherBuilder::default(),
-        );
+        let mut variant_map =
+            HashMap::with_capacity_and_hasher(convergence_groups.len(), IdentityHasherBuilder);
 
         for (v_hash, index_range) in convergence_groups {
             variant_map.entry(v_hash).insert(index_range);
@@ -485,12 +487,9 @@ impl CachedRef {
                 .chunk_by(|(v1, _), (v2, _)| v1 == v2)
                 .for_each(|chunk| {
                     let variant = &chunk[0].0;
-                    match self.variant_map.get(variant) {
-                        None => return,
-                        Some(_) => {
-                            total_num_convergent_q_indices += chunk.len();
-                            num_convergence_groups += 1;
-                        }
+                    if self.variant_map.get(variant).is_some() {
+                        total_num_convergent_q_indices += chunk.len();
+                        num_convergence_groups += 1;
                     }
                 });
 
@@ -502,16 +501,13 @@ impl CachedRef {
                 .chunk_by(|(v1, _), (v2, _)| v1 == v2)
                 .for_each(|chunk| {
                     let variant = &chunk[0].0;
-                    match self.variant_map.get(variant) {
-                        None => return,
-                        Some(span) => {
-                            q_idx_store.extend(chunk.iter().map(|&(_, i)| i));
-                            convergence_groups.push((
-                                cursor..cursor + chunk.len(),
-                                self.get_convergent_indices_from_span(span),
-                            ));
-                            cursor += chunk.len();
-                        }
+                    if let Some(span) = self.variant_map.get(variant) {
+                        q_idx_store.extend(chunk.iter().map(|&(_, i)| i));
+                        convergence_groups.push((
+                            cursor..cursor + chunk.len(),
+                            self.get_convergent_indices_from_span(span),
+                        ));
+                        cursor += chunk.len();
                     }
                 });
 
@@ -553,27 +549,20 @@ impl CachedRef {
         let convergence_groups = if query.variant_map.len() < self.variant_map.len() {
             let mut num_convergence_groups = 0;
 
-            query
-                .variant_map
-                .iter()
-                .for_each(|(variant, _)| match self.variant_map.get(variant) {
-                    None => return,
-                    Some(_) => {
-                        num_convergence_groups += 1;
-                    }
-                });
+            query.variant_map.iter().for_each(|(variant, _)| {
+                if self.variant_map.get(variant).is_some() {
+                    num_convergence_groups += 1;
+                }
+            });
 
             let mut convergence_groups = Vec::with_capacity(num_convergence_groups);
 
             query.variant_map.iter().for_each(|(variant, span_q)| {
-                match self.variant_map.get(variant) {
-                    None => return,
-                    Some(span_r) => {
-                        convergence_groups.push((
-                            query.get_convergent_indices_from_span(span_q),
-                            self.get_convergent_indices_from_span(span_r),
-                        ));
-                    }
+                if let Some(span_r) = self.variant_map.get(variant) {
+                    convergence_groups.push((
+                        query.get_convergent_indices_from_span(span_q),
+                        self.get_convergent_indices_from_span(span_r),
+                    ));
                 }
             });
 
@@ -581,26 +570,20 @@ impl CachedRef {
         } else {
             let mut num_convergence_groups = 0;
 
-            self.variant_map
-                .iter()
-                .for_each(|(variant, _)| match query.variant_map.get(variant) {
-                    None => return,
-                    Some(_) => {
-                        num_convergence_groups += 1;
-                    }
-                });
+            self.variant_map.iter().for_each(|(variant, _)| {
+                if query.variant_map.get(variant).is_some() {
+                    num_convergence_groups += 1;
+                }
+            });
 
             let mut convergence_groups = Vec::with_capacity(num_convergence_groups);
 
             self.variant_map.iter().for_each(|(variant, span_r)| {
-                match query.variant_map.get(variant) {
-                    None => return,
-                    Some(span_q) => {
-                        convergence_groups.push((
-                            query.get_convergent_indices_from_span(span_q),
-                            self.get_convergent_indices_from_span(span_r),
-                        ));
-                    }
+                if let Some(span_q) = query.variant_map.get(variant) {
+                    convergence_groups.push((
+                        query.get_convergent_indices_from_span(span_q),
+                        self.get_convergent_indices_from_span(span_r),
+                    ));
                 }
             });
 
@@ -785,7 +768,7 @@ pub fn get_neighbors_within(
     debug_assert_eq!(remaining.len(), 0);
 
     let candidates = get_hit_candidates_within(&convergent_chunks);
-    let dists = compute_dists(&candidates, &query, &query, max_distance);
+    let dists = compute_dists(&candidates, query, query, max_distance);
 
     Ok(collect_true_hits(&candidates, &dists, max_distance))
 }
@@ -829,18 +812,18 @@ pub fn get_neighbors_across(
     reference: &[impl AsRef<str> + Sync],
     max_distance: u8,
 ) -> Result<NeighborPairs, Error> {
-    if query.len() > CrossIndex::MAX as usize {
+    if query.len() > CrossIndex::MAX {
         return Err(Error::TooManyStrings {
             input_type: InputType::Query,
             got: query.len(),
-            limit: CrossIndex::MAX as usize,
+            limit: CrossIndex::MAX,
         });
     }
-    if reference.len() > CrossIndex::MAX as usize {
+    if reference.len() > CrossIndex::MAX {
         return Err(Error::TooManyStrings {
             input_type: InputType::Reference,
             got: reference.len(),
-            limit: CrossIndex::MAX as usize,
+            limit: CrossIndex::MAX,
         });
     }
     let max_distance = MaxDistance::try_from(max_distance)?;
@@ -968,7 +951,7 @@ pub fn get_neighbors_across(
     debug_assert_eq!(remaining.len(), 0);
 
     let candidates = get_hit_candidates_across(&convergent_chunks);
-    let dists = compute_dists(&candidates, &query, &reference, max_distance);
+    let dists = compute_dists(&candidates, query, reference, max_distance);
 
     Ok(collect_true_hits(&candidates, &dists, max_distance))
 }
@@ -1016,7 +999,7 @@ fn get_num_k_combs(n: usize, k: u8) -> usize {
     let num_subsamples: usize = (n - k as usize + 1..=n).product();
     let subsample_perms: usize = (1..=k as usize).product();
 
-    return num_subsamples / subsample_perms;
+    num_subsamples / subsample_perms
 }
 
 /// Given an input string and its index in the original input vector, generate all possible strings
@@ -1162,7 +1145,7 @@ fn get_hit_candidates_within(convergent_indices: &[impl AsRef<[u32]> + Sync]) ->
             for (i, candidate) in indices
                 .as_ref()
                 .iter()
-                .map(|&v| v)
+                .copied()
                 .tuple_combinations()
                 .enumerate()
             {
@@ -1200,8 +1183,8 @@ where
             for (i, candidate) in indices_q
                 .as_ref()
                 .iter()
-                .map(|&v| v)
-                .cartesian_product(indices_r.as_ref().iter().map(|&v| v))
+                .copied()
+                .cartesian_product(indices_r.as_ref().iter().copied())
                 .enumerate()
             {
                 chunk[i].write(candidate);
