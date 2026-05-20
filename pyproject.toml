@@ -33,6 +33,7 @@ classifiers = [
   "Topic :: Scientific/Engineering",
 ]
 dependencies = ["numpy~=2.3"]
+dynamic = ["version"]
 
 [project.optional-dependencies]
 dev = ["sphinx", "esbonio", "shibuya", "numpydoc", "pandas"]
