@@ -1,3 +1,7 @@
+## Version 0.7.3
+
+- Start using stable Python ABI for Python bindings (locked at v >= 3.10 for now)
+
 ## Version 0.7.2
 
 - (Fix) Executable name is fixed to "symscan" from "symscan-cli"
