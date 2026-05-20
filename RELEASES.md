@@ -1,3 +1,8 @@
+## Version 0.7.2
+
+- (Fix) Executable name is fixed to "symscan" from "symscan-cli"
+- Clean up README
+
 ## Version 0.7.1
 
 - Bugfixes with license packaging
