@@ -726,35 +726,8 @@ pub fn get_neighbors_within(
                 write_vi_pairs_rawidx(s.as_ref(), idx as u32, max_distance, chunk, &hash_builder);
             });
 
-        let mut variant_index_pairs =
-            unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
-
-        variant_index_pairs.par_sort_unstable();
-        variant_index_pairs.dedup();
-
-        let mut total_num_convergent_indices = 0;
-        let mut num_convergence_groups = 0;
-
-        variant_index_pairs
-            .chunk_by(|(v1, _), (v2, _)| v1 == v2)
-            .filter(|chunk| chunk.len() > 1)
-            .for_each(|chunk| {
-                total_num_convergent_indices += chunk.len();
-                num_convergence_groups += 1;
-            });
-
-        let mut convergent_indices = Vec::with_capacity(total_num_convergent_indices);
-        let mut convergence_group_sizes = Vec::with_capacity(num_convergence_groups);
-
-        variant_index_pairs
-            .chunk_by(|(v1, _), (v2, _)| v1 == v2)
-            .filter(|chunk| chunk.len() > 1)
-            .for_each(|chunk| {
-                convergent_indices.extend(chunk.iter().map(|&(_, i)| i));
-                convergence_group_sizes.push(chunk.len());
-            });
-
-        (convergent_indices, convergence_group_sizes)
+        let variant_index_pairs = unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
+        collect_convergent_indices(variant_index_pairs)
     };
 
     let convergent_chunks = get_convergent_chunks(&group_sizes, &convergent_indices[..]);
@@ -867,53 +840,8 @@ pub fn get_neighbors_across(
                 );
             });
 
-        let mut variant_index_pairs =
-            unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
-
-        variant_index_pairs.par_sort_unstable();
-        variant_index_pairs.dedup();
-
-        let mut total_num_convergent_indices = 0;
-        let mut num_convergence_groups = 0;
-
-        variant_index_pairs
-            .chunk_by(|(v1, _), (v2, _)| v1 == v2)
-            .filter(|chunk| chunk.len() > 1)
-            .for_each(|chunk| {
-                total_num_convergent_indices += chunk.len();
-                num_convergence_groups += 1;
-            });
-
-        let mut convergent_indices = Vec::with_capacity(total_num_convergent_indices);
-        let mut convergence_group_sizes = Vec::with_capacity(num_convergence_groups);
-
-        variant_index_pairs
-            .chunk_by(|(v1, _), (v2, _)| v1 == v2)
-            .filter(|chunk| chunk.len() > 1)
-            .map(|chunk| {
-                let len_q = chunk.iter().filter(|(_, ci)| !ci.is_ref()).count();
-                let len_r = chunk.iter().filter(|(_, ci)| ci.is_ref()).count();
-                (chunk, len_q, len_r)
-            })
-            .filter(|(_, len_q, len_r)| len_q * len_r > 0)
-            .for_each(|(chunk, len_q, len_r)| {
-                convergent_indices.extend(
-                    chunk
-                        .iter()
-                        .filter(|(_, ci)| !ci.is_ref())
-                        .map(|&(_, ci)| ci.get_value()),
-                );
-                convergent_indices.extend(
-                    chunk
-                        .iter()
-                        .filter(|(_, ci)| ci.is_ref())
-                        .map(|&(_, ci)| ci.get_value()),
-                );
-
-                convergence_group_sizes.push((len_q, len_r));
-            });
-
-        (convergent_indices, convergence_group_sizes)
+        let variant_index_pairs = unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
+        collect_convergent_indices_cross(variant_index_pairs)
     };
 
     let convergent_chunks = get_convergent_chunks_cross(&group_sizes, &convergent_indices[..]);
@@ -983,35 +911,8 @@ pub fn get_hamming_neighbors_within(
                 );
             });
 
-        let mut variant_index_pairs =
-            unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
-
-        variant_index_pairs.par_sort_unstable();
-        variant_index_pairs.dedup();
-
-        let mut total_num_convergent_indices = 0;
-        let mut num_convergence_groups = 0;
-
-        variant_index_pairs
-            .chunk_by(|(v1, _), (v2, _)| v1 == v2)
-            .filter(|chunk| chunk.len() > 1)
-            .for_each(|chunk| {
-                total_num_convergent_indices += chunk.len();
-                num_convergence_groups += 1;
-            });
-
-        let mut convergent_indices = Vec::with_capacity(total_num_convergent_indices);
-        let mut convergence_group_sizes = Vec::with_capacity(num_convergence_groups);
-
-        variant_index_pairs
-            .chunk_by(|(v1, _), (v2, _)| v1 == v2)
-            .filter(|chunk| chunk.len() > 1)
-            .for_each(|chunk| {
-                convergent_indices.extend(chunk.iter().map(|&(_, i)| i));
-                convergence_group_sizes.push(chunk.len());
-            });
-
-        (convergent_indices, convergence_group_sizes)
+        let variant_index_pairs = unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
+        collect_convergent_indices(variant_index_pairs)
     };
 
     let convergent_chunks = get_convergent_chunks(&group_sizes, &convergent_indices[..]);
@@ -1112,53 +1013,8 @@ pub fn get_hamming_neighbors_across(
                 );
             });
 
-        let mut variant_index_pairs =
-            unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
-
-        variant_index_pairs.par_sort_unstable();
-        variant_index_pairs.dedup();
-
-        let mut total_num_convergent_indices = 0;
-        let mut num_convergence_groups = 0;
-
-        variant_index_pairs
-            .chunk_by(|(v1, _), (v2, _)| v1 == v2)
-            .filter(|chunk| chunk.len() > 1)
-            .for_each(|chunk| {
-                total_num_convergent_indices += chunk.len();
-                num_convergence_groups += 1;
-            });
-
-        let mut convergent_indices = Vec::with_capacity(total_num_convergent_indices);
-        let mut convergence_group_sizes = Vec::with_capacity(num_convergence_groups);
-
-        variant_index_pairs
-            .chunk_by(|(v1, _), (v2, _)| v1 == v2)
-            .filter(|chunk| chunk.len() > 1)
-            .map(|chunk| {
-                let len_q = chunk.iter().filter(|(_, ci)| !ci.is_ref()).count();
-                let len_r = chunk.iter().filter(|(_, ci)| ci.is_ref()).count();
-                (chunk, len_q, len_r)
-            })
-            .filter(|(_, len_q, len_r)| len_q * len_r > 0)
-            .for_each(|(chunk, len_q, len_r)| {
-                convergent_indices.extend(
-                    chunk
-                        .iter()
-                        .filter(|(_, ci)| !ci.is_ref())
-                        .map(|&(_, ci)| ci.get_value()),
-                );
-                convergent_indices.extend(
-                    chunk
-                        .iter()
-                        .filter(|(_, ci)| ci.is_ref())
-                        .map(|&(_, ci)| ci.get_value()),
-                );
-
-                convergence_group_sizes.push((len_q, len_r));
-            });
-
-        (convergent_indices, convergence_group_sizes)
+        let variant_index_pairs = unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
+        collect_convergent_indices_cross(variant_index_pairs)
     };
 
     let convergent_chunks = get_convergent_chunks_cross(&group_sizes, &convergent_indices[..]);
@@ -1395,6 +1251,14 @@ fn prealloc_maybeuninit_vec<T>(total_capacity: usize) -> Vec<MaybeUninit<T>> {
     v
 }
 
+unsafe fn cast_to_initialised_vec<T>(mut input: Vec<MaybeUninit<T>>) -> Vec<T> {
+    let ptr = input.as_mut_ptr() as *mut T;
+    let len = input.len();
+    let cap = input.capacity();
+    std::mem::forget(input);
+    Vec::from_raw_parts(ptr, len, cap)
+}
+
 fn get_disjoint_spans(span_lens: &[usize]) -> Vec<Span> {
     let mut spans = Vec::with_capacity(span_lens.len());
     let mut cursor = 0;
@@ -1447,6 +1311,84 @@ fn get_disjoint_chunks_mut_cross<'a, T>(
     (chunks_a, chunks_b)
 }
 
+fn collect_convergent_indices(mut variant_index_pairs: Vec<(u64, u32)>) -> (Vec<u32>, Vec<usize>) {
+    variant_index_pairs.par_sort_unstable();
+    variant_index_pairs.dedup();
+
+    let mut total_num_convergent_indices = 0;
+    let mut num_convergence_groups = 0;
+
+    variant_index_pairs
+        .chunk_by(|(v1, _), (v2, _)| v1 == v2)
+        .filter(|chunk| chunk.len() > 1)
+        .for_each(|chunk| {
+            total_num_convergent_indices += chunk.len();
+            num_convergence_groups += 1;
+        });
+
+    let mut convergent_indices = Vec::with_capacity(total_num_convergent_indices);
+    let mut convergence_group_sizes = Vec::with_capacity(num_convergence_groups);
+
+    variant_index_pairs
+        .chunk_by(|(v1, _), (v2, _)| v1 == v2)
+        .filter(|chunk| chunk.len() > 1)
+        .for_each(|chunk| {
+            convergent_indices.extend(chunk.iter().map(|&(_, i)| i));
+            convergence_group_sizes.push(chunk.len());
+        });
+
+    (convergent_indices, convergence_group_sizes)
+}
+
+fn collect_convergent_indices_cross(
+    mut variant_index_pairs: Vec<(u64, CrossIndex)>,
+) -> (Vec<u32>, Vec<(usize, usize)>) {
+    variant_index_pairs.par_sort_unstable();
+    variant_index_pairs.dedup();
+
+    let mut total_num_convergent_indices = 0;
+    let mut num_convergence_groups = 0;
+
+    variant_index_pairs
+        .chunk_by(|(v1, _), (v2, _)| v1 == v2)
+        .filter(|chunk| chunk.len() > 1)
+        .for_each(|chunk| {
+            total_num_convergent_indices += chunk.len();
+            num_convergence_groups += 1;
+        });
+
+    let mut convergent_indices = Vec::with_capacity(total_num_convergent_indices);
+    let mut convergence_group_sizes = Vec::with_capacity(num_convergence_groups);
+
+    variant_index_pairs
+        .chunk_by(|(v1, _), (v2, _)| v1 == v2)
+        .filter(|chunk| chunk.len() > 1)
+        .map(|chunk| {
+            let len_q = chunk.iter().filter(|(_, ci)| !ci.is_ref()).count();
+            let len_r = chunk.iter().filter(|(_, ci)| ci.is_ref()).count();
+            (chunk, len_q, len_r)
+        })
+        .filter(|(_, len_q, len_r)| len_q * len_r > 0)
+        .for_each(|(chunk, len_q, len_r)| {
+            convergent_indices.extend(
+                chunk
+                    .iter()
+                    .filter(|(_, ci)| !ci.is_ref())
+                    .map(|&(_, ci)| ci.get_value()),
+            );
+            convergent_indices.extend(
+                chunk
+                    .iter()
+                    .filter(|(_, ci)| ci.is_ref())
+                    .map(|&(_, ci)| ci.get_value()),
+            );
+
+            convergence_group_sizes.push((len_q, len_r));
+        });
+
+    (convergent_indices, convergence_group_sizes)
+}
+
 /// Given a contiguous slice of indices and a slice of sizes that demarcate chunks of indices that
 /// converge to the same deletion variant, return a vector of slices where each slice groups
 /// together indices of strings that converge to the same deletion variant.
@@ -1484,14 +1426,6 @@ fn get_convergent_chunks_cross<'a, T>(
     debug_assert_eq!(convergent_indices.len(), 0);
 
     conv_chunks
-}
-
-unsafe fn cast_to_initialised_vec<T>(mut input: Vec<MaybeUninit<T>>) -> Vec<T> {
-    let ptr = input.as_mut_ptr() as *mut T;
-    let len = input.len();
-    let cap = input.capacity();
-    std::mem::forget(input);
-    Vec::from_raw_parts(ptr, len, cap)
 }
 
 fn get_hit_candidates_within(convergent_indices: &[impl AsRef<[u32]> + Sync]) -> Vec<(u32, u32)> {
@@ -1618,7 +1552,7 @@ fn compute_dists_hamming(
         .collect()
 }
 
-/// Examine and double check hits to see if they are real
+/// Examine and double check hits to see if they are real, then collect into a tuple of vectors.
 fn collect_true_hits(
     hit_candidates: &[(u32, u32)],
     dists: &[u8],
