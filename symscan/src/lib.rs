@@ -22,7 +22,7 @@
 use foldhash::fast::FixedState;
 use hashbrown::HashMap;
 use itertools::Itertools;
-use rapidfuzz::distance::levenshtein;
+use rapidfuzz::distance::{hamming, levenshtein};
 use rayon::prelude::*;
 use std::fmt::Display;
 use std::hash::{BuildHasher, Hasher};
@@ -262,24 +262,24 @@ impl NeighborPairs {
 /// ```
 /// use symscan::{CachedRef, NeighborPairs};
 ///
-/// let reference = ["fooo", "barr", "bazz", "buzz"];
+/// let reference = ["foo", "bar", "baz", "buzz"];
 /// let cached = CachedRef::new(&reference, 2).unwrap();
 ///
 /// let NeighborPairs { row, col, dists } = cached
-///     .get_neighbors_across(&["fizz", "fuzz", "buzz"], 1)
+///     .get_neighbors_across(&["fizz", "fuzz", "buzz", "fizzy"], 1)
 ///     .unwrap();
 ///
-/// assert_eq!(row,   vec![1, 2, 2]);
-/// assert_eq!(col,   vec![3, 2, 3]);
-/// assert_eq!(dists, vec![1, 1, 0]);
+/// assert_eq!(row,   vec![1, 2]);
+/// assert_eq!(col,   vec![3, 3]);
+/// assert_eq!(dists, vec![1, 0]);
 ///
 /// let NeighborPairs { row, col, dists } = cached
-///     .get_neighbors_across(&["fizz", "fuzz", "buzz"], 2)
+///     .get_neighbors_across(&["fizz", "fuzz", "buzz", "fizzy"], 2)
 ///     .unwrap();
 ///
-/// assert_eq!(row,   vec![0, 0, 1, 1, 2, 2]);
-/// assert_eq!(col,   vec![2, 3, 2, 3, 2, 3]);
-/// assert_eq!(dists, vec![2, 2, 2, 1, 1, 0]);
+/// assert_eq!(row,   vec![0, 1, 2, 2]);
+/// assert_eq!(col,   vec![3, 3, 2, 3]);
+/// assert_eq!(dists, vec![2, 1, 2, 0]);
 /// ```
 pub struct CachedRef {
     str_store: Vec<u8>,
@@ -680,18 +680,18 @@ impl CachedRef {
 /// ```
 /// use symscan::{get_neighbors_within, NeighborPairs};
 ///
-/// let query = ["fizz", "fuzz", "buzz"];
+/// let query = ["fizz", "fuzz", "buzz", "fizzy"];
 /// let NeighborPairs { row, col, dists } = get_neighbors_within(&query, 1).unwrap();
 ///
-/// assert_eq!(row,   vec![0, 1]);
-/// assert_eq!(col,   vec![1, 2]);
-/// assert_eq!(dists, vec![1, 1]);
+/// assert_eq!(row,   vec![0, 0, 1]);
+/// assert_eq!(col,   vec![1, 3, 2]);
+/// assert_eq!(dists, vec![1, 1, 1]);
 ///
 /// let NeighborPairs { row, col, dists } = get_neighbors_within(&query, 2).unwrap();
 ///
-/// assert_eq!(row,   vec![0, 0, 1]);
-/// assert_eq!(col,   vec![1, 2, 2]);
-/// assert_eq!(dists, vec![1, 2, 1]);
+/// assert_eq!(row,   vec![0, 0, 0, 1, 1]);
+/// assert_eq!(col,   vec![1, 2, 3, 2, 3]);
+/// assert_eq!(dists, vec![1, 2, 1, 1, 2]);
 /// ```
 pub fn get_neighbors_within(
     query: &[impl AsRef<str> + Sync],
@@ -768,7 +768,7 @@ pub fn get_neighbors_within(
     debug_assert_eq!(remaining.len(), 0);
 
     let candidates = get_hit_candidates_within(&convergent_chunks);
-    let dists = compute_dists(&candidates, query, query, max_distance);
+    let dists = compute_dists_levenshtein(&candidates, query, query, max_distance);
 
     Ok(collect_true_hits(&candidates, &dists, max_distance))
 }
@@ -793,19 +793,19 @@ pub fn get_neighbors_within(
 /// ```
 /// use symscan::{get_neighbors_across, NeighborPairs};
 ///
-/// let query = ["fizz", "fuzz", "buzz"];
-/// let reference = ["fooo", "barr", "bazz", "buzz"];
+/// let query = ["fizz", "fuzz", "buzz", "fizzy"];
+/// let reference = ["foo", "bar", "baz", "buzz"];
 /// let NeighborPairs { row, col, dists } = get_neighbors_across(&query, &reference, 1).unwrap();
 ///
-/// assert_eq!(row,   vec![1, 2, 2]);
-/// assert_eq!(col,   vec![3, 2, 3]);
-/// assert_eq!(dists, vec![1, 1, 0]);
+/// assert_eq!(row,   vec![1, 2]);
+/// assert_eq!(col,   vec![3, 3]);
+/// assert_eq!(dists, vec![1, 0]);
 ///
 /// let NeighborPairs { row, col, dists } = get_neighbors_across(&query, &reference, 2).unwrap();
 ///
-/// assert_eq!(row,   vec![0, 0, 1, 1, 2, 2]);
-/// assert_eq!(col,   vec![2, 3, 2, 3, 2, 3]);
-/// assert_eq!(dists, vec![2, 2, 2, 1, 1, 0]);
+/// assert_eq!(row,   vec![0, 1, 2, 2]);
+/// assert_eq!(col,   vec![3, 3, 2, 3]);
+/// assert_eq!(dists, vec![2, 1, 2, 0]);
 /// ```
 pub fn get_neighbors_across(
     query: &[impl AsRef<str> + Sync],
@@ -951,7 +951,114 @@ pub fn get_neighbors_across(
     debug_assert_eq!(remaining.len(), 0);
 
     let candidates = get_hit_candidates_across(&convergent_chunks);
-    let dists = compute_dists(&candidates, query, reference, max_distance);
+    let dists = compute_dists_levenshtein(&candidates, query, reference, max_distance);
+
+    Ok(collect_true_hits(&candidates, &dists, max_distance))
+}
+
+/// A version of [`get_neighbors_within`] which uses Hamming distance instead of Levenshtein
+/// distance.
+///
+/// # Examples
+///
+/// ```
+/// use symscan::{get_hamming_neighbors_within, NeighborPairs};
+///
+/// let query = ["fizz", "fuzz", "buzz", "fizzy"];
+/// let NeighborPairs { row, col, dists } = get_hamming_neighbors_within(&query, 1).unwrap();
+///
+/// assert_eq!(row,   vec![0, 1]);
+/// assert_eq!(col,   vec![1, 2]);
+/// assert_eq!(dists, vec![1, 1]);
+///
+/// let NeighborPairs { row, col, dists } = get_hamming_neighbors_within(&query, 2).unwrap();
+///
+/// assert_eq!(row,   vec![0, 0, 1]);
+/// assert_eq!(col,   vec![1, 2, 2]);
+/// assert_eq!(dists, vec![1, 2, 1]);
+/// ```
+pub fn get_hamming_neighbors_within(
+    query: &[impl AsRef<str> + Sync],
+    max_distance: u8,
+) -> Result<NeighborPairs, Error> {
+    if query.len() > u32::MAX as usize {
+        return Err(Error::TooManyStrings {
+            input_type: InputType::Query,
+            got: query.len(),
+            limit: u32::MAX as usize,
+        });
+    }
+    let max_distance = MaxDistance::try_from(max_distance)?;
+    check_strings_ascii(query, InputType::Query)?;
+
+    let (convergent_indices, group_sizes) = {
+        let num_vars_per_string = get_num_del_vars_per_string_hamming(query, max_distance);
+
+        let mut variant_index_pairs_uninit =
+            prealloc_maybeuninit_vec(num_vars_per_string.iter().sum());
+        let vip_chunks =
+            get_disjoint_chunks_mut(&num_vars_per_string, &mut variant_index_pairs_uninit[..]);
+
+        let hash_builder = FixedState::default();
+
+        query
+            .par_iter()
+            .zip(vip_chunks.into_par_iter())
+            .enumerate()
+            .with_min_len(100000)
+            .for_each(|(idx, (s, chunk))| {
+                write_vi_pairs_rawidx_hamming(
+                    s.as_ref(),
+                    idx as u32,
+                    max_distance,
+                    chunk,
+                    &hash_builder,
+                );
+            });
+
+        let mut variant_index_pairs =
+            unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
+
+        variant_index_pairs.par_sort_unstable();
+        variant_index_pairs.dedup();
+
+        let mut total_num_convergent_indices = 0;
+        let mut num_convergence_groups = 0;
+
+        variant_index_pairs
+            .chunk_by(|(v1, _), (v2, _)| v1 == v2)
+            .filter(|chunk| chunk.len() > 1)
+            .for_each(|chunk| {
+                total_num_convergent_indices += chunk.len();
+                num_convergence_groups += 1;
+            });
+
+        let mut convergent_indices = Vec::with_capacity(total_num_convergent_indices);
+        let mut convergence_group_sizes = Vec::with_capacity(num_convergence_groups);
+
+        variant_index_pairs
+            .chunk_by(|(v1, _), (v2, _)| v1 == v2)
+            .filter(|chunk| chunk.len() > 1)
+            .for_each(|chunk| {
+                convergent_indices.extend(chunk.iter().map(|&(_, i)| i));
+                convergence_group_sizes.push(chunk.len());
+            });
+
+        (convergent_indices, convergence_group_sizes)
+    };
+
+    let mut convergent_chunks = Vec::with_capacity(group_sizes.len());
+    let mut remaining = &convergent_indices[..];
+    for n in group_sizes {
+        let (chunk, rest) = remaining.split_at(n);
+        convergent_chunks.push(chunk);
+        remaining = rest;
+    }
+
+    debug_assert_eq!(remaining.len(), 0);
+
+    let candidates = get_hit_candidates_within(&convergent_chunks);
+    let dists = compute_dists_hamming(&candidates, query, query, max_distance);
 
     Ok(collect_true_hits(&candidates, &dists, max_distance))
 }
@@ -984,6 +1091,22 @@ fn get_num_del_vars_per_string(
                 num_vars += get_num_k_combs(s.as_ref().len(), k);
             }
             num_vars
+        })
+        .collect_vec()
+}
+
+fn get_num_del_vars_per_string_hamming(
+    strings: &[impl AsRef<str>],
+    max_distance: MaxDistance,
+) -> Vec<usize> {
+    strings
+        .iter()
+        .map(|s| {
+            if max_distance.as_usize() >= s.as_ref().len() {
+                1
+            } else {
+                get_num_k_combs(s.as_ref().len(), max_distance.as_u8())
+            }
         })
         .collect_vec()
 }
@@ -1078,6 +1201,40 @@ fn write_vi_pairs_ci(
             ));
             variant_idx += 1;
         }
+    }
+}
+
+/// Equivalent to write_vi_pairs_rawidx but for Hamming, where we only generate deletions of exactly
+/// max_deletions characters.
+fn write_vi_pairs_rawidx_hamming(
+    input: &str,
+    input_idx: u32,
+    max_deletions: MaxDistance,
+    chunk: &mut [MaybeUninit<(u64, u32)>],
+    hash_builder: &impl BuildHasher,
+) {
+    let input_length = input.len();
+    let num_deletions = max_deletions.as_usize();
+
+    if num_deletions >= input_length {
+        chunk[0].write((hash_string([], hash_builder), input_idx));
+        return;
+    }
+
+    let mut variant_buffer = Vec::with_capacity(input_length - num_deletions);
+
+    for (variant_idx, deletion_indices) in (0..input_length).combinations(num_deletions).enumerate()
+    {
+        variant_buffer.clear();
+        let mut offset = 0;
+
+        for idx in deletion_indices {
+            variant_buffer.extend_from_slice(&input.as_bytes()[offset..idx]);
+            offset = idx + 1;
+        }
+        variant_buffer.extend_from_slice(&input.as_bytes()[offset..input_length]);
+
+        chunk[variant_idx].write((hash_string(&variant_buffer, hash_builder), input_idx));
     }
 }
 
@@ -1199,7 +1356,7 @@ where
     hit_candidates
 }
 
-fn compute_dists(
+fn compute_dists_levenshtein(
     hit_candidates: &[(u32, u32)],
     query: &[impl AsRef<str> + Sync],
     reference: &[impl AsRef<str> + Sync],
@@ -1209,18 +1366,44 @@ fn compute_dists(
         .par_iter()
         .with_min_len(100000)
         .map(|&(idx_query, idx_reference)| {
-            let dist = {
-                match levenshtein::distance_with_args(
+            match levenshtein::distance_with_args(
+                query[idx_query as usize].as_ref().bytes(),
+                reference[idx_reference as usize].as_ref().bytes(),
+                &levenshtein::Args::default().score_cutoff(max_distance.as_usize()),
+            ) {
+                None => u8::MAX,
+                Some(dist) => dist as u8,
+            }
+        })
+        .collect()
+}
+
+fn compute_dists_hamming(
+    hit_candidates: &[(u32, u32)],
+    query: &[impl AsRef<str> + Sync],
+    reference: &[impl AsRef<str> + Sync],
+    max_distance: MaxDistance,
+) -> Vec<u8> {
+    hit_candidates
+        .par_iter()
+        .with_min_len(100000)
+        .map(|&(idx_query, idx_reference)| {
+            debug_assert!(
+                query[idx_query as usize].as_ref().len()
+                    == reference[idx_reference as usize].as_ref().len()
+            );
+
+            match unsafe {
+                hamming::distance_with_args(
                     query[idx_query as usize].as_ref().bytes(),
                     reference[idx_reference as usize].as_ref().bytes(),
-                    &levenshtein::Args::default().score_cutoff(max_distance.as_usize()),
-                ) {
-                    None => u8::MAX,
-                    Some(dist) => dist as u8,
-                }
-            };
-
-            dist
+                    &hamming::Args::default().score_cutoff(max_distance.as_usize()),
+                )
+                .unwrap_unchecked()
+            } {
+                None => u8::MAX,
+                Some(dist) => dist as u8,
+            }
         })
         .collect()
 }
@@ -1316,7 +1499,7 @@ mod tests {
         ];
 
         for (candidates, reference, mdist, expected) in cases {
-            let results = compute_dists(&candidates, &TEST_QUERY, reference, mdist);
+            let results = compute_dists_levenshtein(&candidates, &TEST_QUERY, reference, mdist);
             assert_eq!(results, expected);
         }
     }
