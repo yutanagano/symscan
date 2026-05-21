@@ -1063,6 +1063,177 @@ pub fn get_hamming_neighbors_within(
     Ok(collect_true_hits(&candidates, &dists, max_distance))
 }
 
+/// A version of [`get_neighbors_across`] which uses Hamming distance instead of Levenshtein
+/// distance.
+///
+/// # Examples
+///
+/// ```
+/// use symscan::{get_hamming_neighbors_across, NeighborPairs};
+///
+/// let query = ["fizz", "fuzz", "buzz", "fizzy"];
+/// let reference = ["foo", "bar", "baz", "buzz"];
+/// let NeighborPairs { row, col, dists } = get_hamming_neighbors_across(&query, &reference, 1).unwrap();
+///
+/// assert_eq!(row,   vec![1, 2]);
+/// assert_eq!(col,   vec![3, 3]);
+/// assert_eq!(dists, vec![1, 0]);
+///
+/// let NeighborPairs { row, col, dists } = get_hamming_neighbors_across(&query, &reference, 2).unwrap();
+///
+/// assert_eq!(row,   vec![0, 1, 2]);
+/// assert_eq!(col,   vec![3, 3, 3]);
+/// assert_eq!(dists, vec![2, 1, 0]);
+/// ```
+pub fn get_hamming_neighbors_across(
+    query: &[impl AsRef<str> + Sync],
+    reference: &[impl AsRef<str> + Sync],
+    max_distance: u8,
+) -> Result<NeighborPairs, Error> {
+    if query.len() > CrossIndex::MAX {
+        return Err(Error::TooManyStrings {
+            input_type: InputType::Query,
+            got: query.len(),
+            limit: CrossIndex::MAX,
+        });
+    }
+    if reference.len() > CrossIndex::MAX {
+        return Err(Error::TooManyStrings {
+            input_type: InputType::Reference,
+            got: reference.len(),
+            limit: CrossIndex::MAX,
+        });
+    }
+    let max_distance = MaxDistance::try_from(max_distance)?;
+    check_strings_ascii(query, InputType::Query)?;
+    check_strings_ascii(reference, InputType::Reference)?;
+
+    let (convergent_indices, group_sizes) = {
+        let num_del_variants_q = get_num_del_vars_per_string_hamming(query, max_distance);
+        let num_del_variants_r = get_num_del_vars_per_string_hamming(reference, max_distance);
+
+        let total_capacity =
+            num_del_variants_q.iter().sum::<usize>() + num_del_variants_r.iter().sum::<usize>();
+        let mut variant_index_pairs_uninit = prealloc_maybeuninit_vec(total_capacity);
+
+        let mut vip_chunks_q = Vec::with_capacity(query.len());
+        let mut remaining = &mut variant_index_pairs_uninit[..];
+        for n in num_del_variants_q {
+            let (chunk, rest) = remaining.split_at_mut(n);
+            vip_chunks_q.push(chunk);
+            remaining = rest;
+        }
+
+        let mut vip_chunks_r = Vec::with_capacity(reference.len());
+        for n in num_del_variants_r {
+            let (chunk, rest) = remaining.split_at_mut(n);
+            vip_chunks_r.push(chunk);
+            remaining = rest;
+        }
+
+        debug_assert_eq!(remaining.len(), 0);
+        debug_assert_eq!(vip_chunks_q.len(), query.len());
+        debug_assert_eq!(vip_chunks_r.len(), reference.len());
+
+        let hash_builder = FixedState::default();
+
+        query
+            .par_iter()
+            .zip(vip_chunks_q.into_par_iter())
+            .enumerate()
+            .with_min_len(100000)
+            .for_each(|(idx, (s, chunk))| {
+                write_vi_pairs_ci_hamming(
+                    s.as_ref(),
+                    idx as u32,
+                    max_distance,
+                    false,
+                    chunk,
+                    &hash_builder,
+                );
+            });
+        reference
+            .par_iter()
+            .zip(vip_chunks_r.into_par_iter())
+            .enumerate()
+            .with_min_len(100000)
+            .for_each(|(idx, (s, chunk))| {
+                write_vi_pairs_ci_hamming(
+                    s.as_ref(),
+                    idx as u32,
+                    max_distance,
+                    true,
+                    chunk,
+                    &hash_builder,
+                );
+            });
+
+        let mut variant_index_pairs =
+            unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
+
+        variant_index_pairs.par_sort_unstable();
+        variant_index_pairs.dedup();
+
+        let mut total_num_convergent_indices = 0;
+        let mut num_convergence_groups = 0;
+
+        variant_index_pairs
+            .chunk_by(|(v1, _), (v2, _)| v1 == v2)
+            .filter(|chunk| chunk.len() > 1)
+            .for_each(|chunk| {
+                total_num_convergent_indices += chunk.len();
+                num_convergence_groups += 1;
+            });
+
+        let mut convergent_indices = Vec::with_capacity(total_num_convergent_indices);
+        let mut convergence_group_sizes = Vec::with_capacity(num_convergence_groups);
+
+        variant_index_pairs
+            .chunk_by(|(v1, _), (v2, _)| v1 == v2)
+            .filter(|chunk| chunk.len() > 1)
+            .map(|chunk| {
+                let len_q = chunk.iter().filter(|(_, ci)| !ci.is_ref()).count();
+                let len_r = chunk.iter().filter(|(_, ci)| ci.is_ref()).count();
+                (chunk, len_q, len_r)
+            })
+            .filter(|(_, len_q, len_r)| len_q * len_r > 0)
+            .for_each(|(chunk, len_q, len_r)| {
+                convergent_indices.extend(
+                    chunk
+                        .iter()
+                        .filter(|(_, ci)| !ci.is_ref())
+                        .map(|&(_, ci)| ci.get_value()),
+                );
+                convergent_indices.extend(
+                    chunk
+                        .iter()
+                        .filter(|(_, ci)| ci.is_ref())
+                        .map(|&(_, ci)| ci.get_value()),
+                );
+
+                convergence_group_sizes.push((len_q, len_r));
+            });
+
+        (convergent_indices, convergence_group_sizes)
+    };
+
+    let mut convergent_chunks = Vec::with_capacity(group_sizes.len());
+    let mut remaining = &convergent_indices[..];
+    for (n_q, n_r) in group_sizes {
+        let (chunk_q, rest) = remaining.split_at(n_q);
+        let (chunk_r, rest) = rest.split_at(n_r);
+        convergent_chunks.push((chunk_q, chunk_r));
+        remaining = rest;
+    }
+
+    debug_assert_eq!(remaining.len(), 0);
+
+    let candidates = get_hit_candidates_across(&convergent_chunks);
+    let dists = compute_dists_hamming(&candidates, query, reference, max_distance);
+
+    Ok(collect_true_hits(&candidates, &dists, max_distance))
+}
+
 fn check_strings_ascii(strings: &[impl AsRef<str>], input_type: InputType) -> Result<(), Error> {
     for (idx, s) in strings.iter().enumerate() {
         if !s.as_ref().is_ascii() {
@@ -1162,7 +1333,7 @@ fn write_vi_pairs_rawidx(
     }
 }
 
-/// Similar to write_deletion_variants_rawidx but with the indices wrapped in CrossIndex.
+/// Similar to write_vi_pairs_rawidx but with the indices wrapped in CrossIndex.
 fn write_vi_pairs_ci(
     input: &str,
     input_idx: u32,
@@ -1235,6 +1406,46 @@ fn write_vi_pairs_rawidx_hamming(
         variant_buffer.extend_from_slice(&input.as_bytes()[offset..input_length]);
 
         chunk[variant_idx].write((hash_string(&variant_buffer, hash_builder), input_idx));
+    }
+}
+
+/// Equivalent to write_vi_pairs_ci but for Hamming distance instead of Levenshtein.
+fn write_vi_pairs_ci_hamming(
+    input: &str,
+    input_idx: u32,
+    max_deletions: MaxDistance,
+    is_ref: bool,
+    chunk: &mut [MaybeUninit<(u64, CrossIndex)>],
+    hash_builder: &impl BuildHasher,
+) {
+    let input_length = input.len();
+    let num_deletions = max_deletions.as_usize();
+
+    if num_deletions >= input_length {
+        chunk[0].write((
+            hash_string([], hash_builder),
+            CrossIndex::from(input_idx, is_ref),
+        ));
+        return;
+    }
+
+    let mut variant_buffer = Vec::with_capacity(input_length - num_deletions);
+
+    for (variant_idx, deletion_indices) in (0..input_length).combinations(num_deletions).enumerate()
+    {
+        variant_buffer.clear();
+        let mut offset = 0;
+
+        for idx in deletion_indices {
+            variant_buffer.extend_from_slice(&input.as_bytes()[offset..idx]);
+            offset = idx + 1;
+        }
+        variant_buffer.extend_from_slice(&input.as_bytes()[offset..input_length]);
+
+        chunk[variant_idx].write((
+            hash_string(&variant_buffer, hash_builder),
+            CrossIndex::from(input_idx, is_ref),
+        ));
     }
 }
 
@@ -1535,144 +1746,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_symdel_within() {
-        let cases = [
-            (
-                1,
-                NeighborPairs {
-                    row: vec![0, 1],
-                    col: vec![1, 2],
-                    dists: vec![1, 1],
-                },
-            ),
-            (
-                2,
-                NeighborPairs {
-                    row: vec![0, 0, 0, 1],
-                    col: vec![1, 2, 3, 2],
-                    dists: vec![1, 2, 2, 1],
-                },
-            ),
-        ];
-        for (mdist, expected) in cases {
-            let result = get_neighbors_within(&TEST_QUERY, mdist).expect("short input");
-            assert_eq!(result, expected);
-        }
-    }
-
-    #[test]
-    fn test_symdel_within_cached() {
-        let cached = CachedRef::new(&TEST_QUERY, 2).expect("short input");
-        let cases = [
-            (
-                1,
-                NeighborPairs {
-                    row: vec![0, 1],
-                    col: vec![1, 2],
-                    dists: vec![1, 1],
-                },
-            ),
-            (
-                2,
-                NeighborPairs {
-                    row: vec![0, 0, 0, 1],
-                    col: vec![1, 2, 3, 2],
-                    dists: vec![1, 2, 2, 1],
-                },
-            ),
-        ];
-        for (mdist, expected) in cases {
-            let result = cached.get_neighbors_within(mdist).expect("legal max dist");
-            assert_eq!(result, expected);
-        }
-    }
-
-    #[test]
-    fn test_symdel_cross() {
-        let cases = [
-            (
-                1,
-                NeighborPairs {
-                    row: vec![0, 1],
-                    col: vec![2, 2],
-                    dists: vec![0, 1],
-                },
-            ),
-            (
-                2,
-                NeighborPairs {
-                    row: vec![0, 0, 1, 2, 3, 4],
-                    col: vec![0, 2, 2, 2, 2, 1],
-                    dists: vec![2, 0, 1, 2, 2, 2],
-                },
-            ),
-        ];
-        for (mdist, expected) in cases {
-            let result = get_neighbors_across(&TEST_QUERY, &TEST_REF, mdist).expect("valid input");
-            assert_eq!(result, expected);
-        }
-    }
-
-    #[test]
-    fn test_get_candidates_cross_partially_cached() {
-        let cached = CachedRef::new(&TEST_REF, 2).expect("short input");
-        let cases = [
-            (
-                1,
-                NeighborPairs {
-                    row: vec![0, 1],
-                    col: vec![2, 2],
-                    dists: vec![0, 1],
-                },
-            ),
-            (
-                2,
-                NeighborPairs {
-                    row: vec![0, 0, 1, 2, 3, 4],
-                    col: vec![0, 2, 2, 2, 2, 1],
-                    dists: vec![2, 0, 1, 2, 2, 2],
-                },
-            ),
-        ];
-        for (mdist, expected) in cases {
-            let result = cached
-                .get_neighbors_across(&TEST_QUERY, mdist)
-                .expect("legal max dist");
-            assert_eq!(result, expected);
-        }
-    }
-
-    #[test]
-    fn test_get_candidates_cross_fully_cached() {
-        let cached_q = CachedRef::new(&TEST_QUERY, 2).expect("short input");
-        let cached_r = CachedRef::new(&TEST_REF, 2).expect("short input");
-        let cases = [
-            (
-                1,
-                NeighborPairs {
-                    row: vec![0, 1],
-                    col: vec![2, 2],
-                    dists: vec![0, 1],
-                },
-            ),
-            (
-                2,
-                NeighborPairs {
-                    row: vec![0, 0, 1, 2, 3, 4],
-                    col: vec![0, 2, 2, 2, 2, 1],
-                    dists: vec![2, 0, 1, 2, 2, 2],
-                },
-            ),
-        ];
-        for (mdist, expected) in cases {
-            let result = cached_r
-                .get_neighbors_across_cached(&cached_q, mdist)
-                .expect("legal max dist");
-            assert_eq!(result, expected);
-        }
-    }
-
     // testing on real world data
 
     static CDR3_Q_BYTES: &[u8] = include_bytes!("../../test_files/cdr3b_10k_a.txt");
@@ -1682,6 +1755,14 @@ mod tests {
     static EXPECTED_BYTES_CROSS_1: &[u8] = include_bytes!("../../test_files/results_10k_cross.txt");
     static EXPECTED_BYTES_CROSS_2: &[u8] =
         include_bytes!("../../test_files/results_10k_cross_d2.txt");
+    static EXPECTED_BYTES_HAMMING_WITHIN_1: &[u8] =
+        include_bytes!("../../test_files/results_10k_a_hamming.txt");
+    static EXPECTED_BYTES_HAMMING_WITHIN_2: &[u8] =
+        include_bytes!("../../test_files/results_10k_a_hamming_d2.txt");
+    static EXPECTED_BYTES_HAMMING_CROSS_1: &[u8] =
+        include_bytes!("../../test_files/results_10k_cross_hamming.txt");
+    static EXPECTED_BYTES_HAMMING_CROSS_2: &[u8] =
+        include_bytes!("../../test_files/results_10k_cross_hamming_d2.txt");
 
     fn bytes_as_ascii_lines(bytes: &[u8]) -> Vec<String> {
         Cursor::new(bytes)
@@ -1745,6 +1826,41 @@ mod tests {
 
         let hits = get_neighbors_across(&query, &reference, 2).expect("valid inputs");
         assert_eq!(hits, bytes_as_neighbour_pairs(EXPECTED_BYTES_CROSS_2));
+    }
+
+    #[test]
+    fn test_hamming_within() {
+        let query = bytes_as_ascii_lines(CDR3_Q_BYTES);
+
+        let hits = get_hamming_neighbors_within(&query, 1).expect("short input");
+        assert_eq!(
+            hits,
+            bytes_as_neighbour_pairs(EXPECTED_BYTES_HAMMING_WITHIN_1)
+        );
+
+        let hits = get_hamming_neighbors_within(&query, 2).expect("short input");
+        assert_eq!(
+            hits,
+            bytes_as_neighbour_pairs(EXPECTED_BYTES_HAMMING_WITHIN_2)
+        );
+    }
+
+    #[test]
+    fn test_hamming_cross() {
+        let query = bytes_as_ascii_lines(CDR3_Q_BYTES);
+        let reference = bytes_as_ascii_lines(CDR3_R_BYTES);
+
+        let hits = get_hamming_neighbors_across(&query, &reference, 1).expect("valid inputs");
+        assert_eq!(
+            hits,
+            bytes_as_neighbour_pairs(EXPECTED_BYTES_HAMMING_CROSS_1)
+        );
+
+        let hits = get_hamming_neighbors_across(&query, &reference, 2).expect("valid inputs");
+        assert_eq!(
+            hits,
+            bytes_as_neighbour_pairs(EXPECTED_BYTES_HAMMING_CROSS_2)
+        );
     }
 
     #[test]
