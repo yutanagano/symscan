@@ -109,7 +109,7 @@ fn main() {
 
 /// Get a buffered reader to a file at path.
 fn get_file_bufreader(path: &str) -> BufReader<File> {
-    let file = File::open(&path).unwrap_or_else(|e| {
+    let file = File::open(path).unwrap_or_else(|e| {
         eprintln!("failed to open {}: {}", &path, e);
         process::exit(1)
     });
@@ -144,16 +144,16 @@ fn get_input_lines_as_ascii(in_stream: impl BufRead) -> Result<Vec<String>, Erro
 fn write_true_hits(hits: NeighborPairs, zero_index: bool, writer: &mut impl Write) {
     for idx in 0..hits.len() {
         if zero_index {
-            write!(
+            writeln!(
                 writer,
-                "{},{},{}\n",
+                "{},{},{}",
                 hits.row[idx], hits.col[idx], hits.dists[idx]
             )
             .unwrap();
         } else {
-            write!(
+            writeln!(
                 writer,
-                "{},{},{}\n",
+                "{},{},{}",
                 hits.row[idx] + 1,
                 hits.col[idx] + 1,
                 hits.dists[idx]
@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn test_get_input_lines_as_ascii_rejects_non_ascii() {
         let strings = get_input_lines_as_ascii(&mut "foo\nbar\nバズ\n".as_bytes());
-        assert!(matches!(strings, Err(_)));
+        assert!(strings.is_err());
     }
 
     #[test]
