@@ -837,25 +837,11 @@ pub fn get_neighbors_across(
         let total_capacity =
             num_del_variants_q.iter().sum::<usize>() + num_del_variants_r.iter().sum::<usize>();
         let mut variant_index_pairs_uninit = prealloc_maybeuninit_vec(total_capacity);
-
-        let mut vip_chunks_q = Vec::with_capacity(query.len());
-        let mut remaining = &mut variant_index_pairs_uninit[..];
-        for n in num_del_variants_q {
-            let (chunk, rest) = remaining.split_at_mut(n);
-            vip_chunks_q.push(chunk);
-            remaining = rest;
-        }
-
-        let mut vip_chunks_r = Vec::with_capacity(reference.len());
-        for n in num_del_variants_r {
-            let (chunk, rest) = remaining.split_at_mut(n);
-            vip_chunks_r.push(chunk);
-            remaining = rest;
-        }
-
-        debug_assert_eq!(remaining.len(), 0);
-        debug_assert_eq!(vip_chunks_q.len(), query.len());
-        debug_assert_eq!(vip_chunks_r.len(), reference.len());
+        let (vip_chunks_q, vip_chunks_r) = get_disjoint_chunks_mut_cross(
+            &num_del_variants_q,
+            &num_del_variants_r,
+            &mut variant_index_pairs_uninit[..],
+        );
 
         let hash_builder = FixedState::default();
 
@@ -1115,25 +1101,11 @@ pub fn get_hamming_neighbors_across(
         let total_capacity =
             num_del_variants_q.iter().sum::<usize>() + num_del_variants_r.iter().sum::<usize>();
         let mut variant_index_pairs_uninit = prealloc_maybeuninit_vec(total_capacity);
-
-        let mut vip_chunks_q = Vec::with_capacity(query.len());
-        let mut remaining = &mut variant_index_pairs_uninit[..];
-        for n in num_del_variants_q {
-            let (chunk, rest) = remaining.split_at_mut(n);
-            vip_chunks_q.push(chunk);
-            remaining = rest;
-        }
-
-        let mut vip_chunks_r = Vec::with_capacity(reference.len());
-        for n in num_del_variants_r {
-            let (chunk, rest) = remaining.split_at_mut(n);
-            vip_chunks_r.push(chunk);
-            remaining = rest;
-        }
-
-        debug_assert_eq!(remaining.len(), 0);
-        debug_assert_eq!(vip_chunks_q.len(), query.len());
-        debug_assert_eq!(vip_chunks_r.len(), reference.len());
+        let (vip_chunks_q, vip_chunks_r) = get_disjoint_chunks_mut_cross(
+            &num_del_variants_q,
+            &num_del_variants_r,
+            &mut variant_index_pairs_uninit[..],
+        );
 
         let hash_builder = FixedState::default();
 
@@ -1485,6 +1457,32 @@ fn get_disjoint_chunks_mut<'a, T>(
     debug_assert_eq!(backing_memory.len(), 0);
 
     chunks
+}
+
+/// Similar to get_disjoint_chunks_mut but for cross-set queries. Takes two chunk length slices and
+/// generates two chunk vectors.
+fn get_disjoint_chunks_mut_cross<'a, T>(
+    chunk_lens_a: &[usize],
+    chunk_lens_b: &[usize],
+    mut backing_memory: &'a mut [T],
+) -> (Vec<&'a mut [T]>, Vec<&'a mut [T]>) {
+    let mut chunks_a = Vec::with_capacity(chunk_lens_a.len());
+    for &n in chunk_lens_a {
+        let (chunk, rest) = backing_memory.split_at_mut(n);
+        chunks_a.push(chunk);
+        backing_memory = rest;
+    }
+
+    let mut chunks_b = Vec::with_capacity(chunk_lens_b.len());
+    for &n in chunk_lens_b {
+        let (chunk, rest) = backing_memory.split_at_mut(n);
+        chunks_b.push(chunk);
+        backing_memory = rest;
+    }
+
+    debug_assert_eq!(backing_memory.len(), 0);
+
+    (chunks_a, chunks_b)
 }
 
 unsafe fn cast_to_initialised_vec<T>(mut input: Vec<MaybeUninit<T>>) -> Vec<T> {
