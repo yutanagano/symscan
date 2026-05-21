@@ -757,16 +757,7 @@ pub fn get_neighbors_within(
         (convergent_indices, convergence_group_sizes)
     };
 
-    let mut convergent_chunks = Vec::with_capacity(group_sizes.len());
-    let mut remaining = &convergent_indices[..];
-    for n in group_sizes {
-        let (chunk, rest) = remaining.split_at(n);
-        convergent_chunks.push(chunk);
-        remaining = rest;
-    }
-
-    debug_assert_eq!(remaining.len(), 0);
-
+    let convergent_chunks = get_convergent_chunks(&group_sizes, &convergent_indices[..]);
     let candidates = get_hit_candidates_within(&convergent_chunks);
     let dists = compute_dists_levenshtein(&candidates, query, query, max_distance);
 
@@ -925,17 +916,7 @@ pub fn get_neighbors_across(
         (convergent_indices, convergence_group_sizes)
     };
 
-    let mut convergent_chunks = Vec::with_capacity(group_sizes.len());
-    let mut remaining = &convergent_indices[..];
-    for (n_q, n_r) in group_sizes {
-        let (chunk_q, rest) = remaining.split_at(n_q);
-        let (chunk_r, rest) = rest.split_at(n_r);
-        convergent_chunks.push((chunk_q, chunk_r));
-        remaining = rest;
-    }
-
-    debug_assert_eq!(remaining.len(), 0);
-
+    let convergent_chunks = get_convergent_chunks_cross(&group_sizes, &convergent_indices[..]);
     let candidates = get_hit_candidates_across(&convergent_chunks);
     let dists = compute_dists_levenshtein(&candidates, query, reference, max_distance);
 
@@ -1033,16 +1014,7 @@ pub fn get_hamming_neighbors_within(
         (convergent_indices, convergence_group_sizes)
     };
 
-    let mut convergent_chunks = Vec::with_capacity(group_sizes.len());
-    let mut remaining = &convergent_indices[..];
-    for n in group_sizes {
-        let (chunk, rest) = remaining.split_at(n);
-        convergent_chunks.push(chunk);
-        remaining = rest;
-    }
-
-    debug_assert_eq!(remaining.len(), 0);
-
+    let convergent_chunks = get_convergent_chunks(&group_sizes, &convergent_indices[..]);
     let candidates = get_hit_candidates_within(&convergent_chunks);
     let dists = compute_dists_hamming(&candidates, query, query, max_distance);
 
@@ -1189,17 +1161,7 @@ pub fn get_hamming_neighbors_across(
         (convergent_indices, convergence_group_sizes)
     };
 
-    let mut convergent_chunks = Vec::with_capacity(group_sizes.len());
-    let mut remaining = &convergent_indices[..];
-    for (n_q, n_r) in group_sizes {
-        let (chunk_q, rest) = remaining.split_at(n_q);
-        let (chunk_r, rest) = rest.split_at(n_r);
-        convergent_chunks.push((chunk_q, chunk_r));
-        remaining = rest;
-    }
-
-    debug_assert_eq!(remaining.len(), 0);
-
+    let convergent_chunks = get_convergent_chunks_cross(&group_sizes, &convergent_indices[..]);
     let candidates = get_hit_candidates_across(&convergent_chunks);
     let dists = compute_dists_hamming(&candidates, query, reference, max_distance);
 
@@ -1483,6 +1445,45 @@ fn get_disjoint_chunks_mut_cross<'a, T>(
     debug_assert_eq!(backing_memory.len(), 0);
 
     (chunks_a, chunks_b)
+}
+
+/// Given a contiguous slice of indices and a slice of sizes that demarcate chunks of indices that
+/// converge to the same deletion variant, return a vector of slices where each slice groups
+/// together indices of strings that converge to the same deletion variant.
+fn get_convergent_chunks<'a, T>(
+    conv_group_sizes: &[usize],
+    mut convergent_indices: &'a [T],
+) -> Vec<&'a [T]> {
+    let mut conv_chunks = Vec::with_capacity(conv_group_sizes.len());
+    for &n in conv_group_sizes {
+        let (chunk, rest) = convergent_indices.split_at(n);
+        conv_chunks.push(chunk);
+        convergent_indices = rest;
+    }
+
+    debug_assert_eq!(convergent_indices.len(), 0);
+
+    conv_chunks
+}
+
+/// Similar to get_convergent_chunks but for cross-set queries, where the elements in the output
+/// vector are two-tuples of slices, the first slice of the convergent indices from the query set,
+/// and the second slice of convergent indices from the reference set.
+fn get_convergent_chunks_cross<'a, T>(
+    conv_group_sizes: &[(usize, usize)],
+    mut convergent_indices: &'a [T],
+) -> Vec<(&'a [T], &'a [T])> {
+    let mut conv_chunks = Vec::with_capacity(conv_group_sizes.len());
+    for &(n_q, n_r) in conv_group_sizes {
+        let (chunk_q, rest) = convergent_indices.split_at(n_q);
+        let (chunk_r, rest) = rest.split_at(n_r);
+        conv_chunks.push((chunk_q, chunk_r));
+        convergent_indices = rest;
+    }
+
+    debug_assert_eq!(convergent_indices.len(), 0);
+
+    conv_chunks
 }
 
 unsafe fn cast_to_initialised_vec<T>(mut input: Vec<MaybeUninit<T>>) -> Vec<T> {
