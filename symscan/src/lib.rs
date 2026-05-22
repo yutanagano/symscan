@@ -424,7 +424,7 @@ impl CachedRef {
         let candidates = get_hit_candidates_within(&convergent_indices);
         let dists = self.compute_dists_fully_cached(&candidates, self, max_distance);
 
-        Ok(collect_true_hits(&candidates, &dists, max_distance))
+        Ok(validate_and_collect_hits(candidates, dists, max_distance))
     }
 
     /// The memoized equivalent of [`get_neighbors_across`].
@@ -522,7 +522,7 @@ impl CachedRef {
         let candidates = get_hit_candidates_across(&convergence_groups);
         let dists = self.compute_dists_partially_cached(&candidates, query, max_distance);
 
-        Ok(collect_true_hits(&candidates, &dists, max_distance))
+        Ok(validate_and_collect_hits(candidates, dists, max_distance))
     }
 
     /// Equivalent to [`CachedRef::get_neighbors_across`], where the query is also a [`CachedRef`]
@@ -593,7 +593,7 @@ impl CachedRef {
         let candidates = get_hit_candidates_across(&convergence_groups);
         let dists = self.compute_dists_fully_cached(&candidates, query, max_distance);
 
-        Ok(collect_true_hits(&candidates, &dists, max_distance))
+        Ok(validate_and_collect_hits(candidates, dists, max_distance))
     }
 
     #[inline(always)]
@@ -734,7 +734,7 @@ pub fn get_neighbors_within(
     let candidates = get_hit_candidates_within(&convergent_chunks);
     let dists = compute_dists_levenshtein(&candidates, query, query, max_distance);
 
-    Ok(collect_true_hits(&candidates, &dists, max_distance))
+    Ok(validate_and_collect_hits(candidates, dists, max_distance))
 }
 
 /// Detect string pairs across two input collections that lie within a threshold edit distance.
@@ -848,7 +848,7 @@ pub fn get_neighbors_across(
     let candidates = get_hit_candidates_across(&convergent_chunks);
     let dists = compute_dists_levenshtein(&candidates, query, reference, max_distance);
 
-    Ok(collect_true_hits(&candidates, &dists, max_distance))
+    Ok(validate_and_collect_hits(candidates, dists, max_distance))
 }
 
 /// A version of [`get_neighbors_within`] which uses Hamming distance instead of Levenshtein
@@ -919,7 +919,7 @@ pub fn get_hamming_neighbors_within(
     let candidates = get_hit_candidates_within(&convergent_chunks);
     let dists = compute_dists_hamming(&candidates, query, query, max_distance);
 
-    Ok(collect_true_hits(&candidates, &dists, max_distance))
+    Ok(validate_and_collect_hits(candidates, dists, max_distance))
 }
 
 /// A version of [`get_neighbors_across`] which uses Hamming distance instead of Levenshtein
@@ -1021,7 +1021,7 @@ pub fn get_hamming_neighbors_across(
     let candidates = get_hit_candidates_across(&convergent_chunks);
     let dists = compute_dists_hamming(&candidates, query, reference, max_distance);
 
-    Ok(collect_true_hits(&candidates, &dists, max_distance))
+    Ok(validate_and_collect_hits(candidates, dists, max_distance))
 }
 
 fn check_strings_ascii(strings: &[impl AsRef<str>], input_type: InputType) -> Result<(), Error> {
@@ -1174,26 +1174,29 @@ fn write_vi_pairs_rawidx_hamming(
     chunk: &mut [MaybeUninit<(u64, u32)>],
     hash_builder: &impl BuildHasher,
 ) {
+    const NULL_CHARACTER: u8 = u8::MAX;
     let input_length = input.len();
-    let num_deletions = max_deletions.as_usize();
+    let mut variant_buffer = Vec::with_capacity(input_length);
 
-    if num_deletions >= input_length {
-        chunk[0].write((hash_string([], hash_builder), input_idx));
+    if max_deletions.as_usize() >= input_length {
+        variant_buffer.fill(NULL_CHARACTER);
+        chunk[0].write((hash_string(variant_buffer, hash_builder), input_idx));
         return;
     }
 
-    let mut variant_buffer = Vec::with_capacity(input_length - num_deletions);
-
-    for (variant_idx, deletion_indices) in (0..input_length).combinations(num_deletions).enumerate()
+    for (variant_idx, deletion_indices) in (0..input_length)
+        .combinations(max_deletions.as_usize())
+        .enumerate()
     {
         variant_buffer.clear();
-        let mut offset = 0;
+        let mut cursor = 0;
 
         for idx in deletion_indices {
-            variant_buffer.extend_from_slice(&input.as_bytes()[offset..idx]);
-            offset = idx + 1;
+            variant_buffer.extend_from_slice(&input.as_bytes()[cursor..idx]);
+            variant_buffer.push(NULL_CHARACTER);
+            cursor = idx + 1;
         }
-        variant_buffer.extend_from_slice(&input.as_bytes()[offset..input_length]);
+        variant_buffer.extend_from_slice(&input.as_bytes()[cursor..input_length]);
 
         chunk[variant_idx].write((hash_string(&variant_buffer, hash_builder), input_idx));
     }
@@ -1208,29 +1211,32 @@ fn write_vi_pairs_ci_hamming(
     chunk: &mut [MaybeUninit<(u64, CrossIndex)>],
     hash_builder: &impl BuildHasher,
 ) {
+    const NULL_CHARACTER: u8 = u8::MAX;
     let input_length = input.len();
-    let num_deletions = max_deletions.as_usize();
+    let mut variant_buffer = Vec::with_capacity(input_length);
 
-    if num_deletions >= input_length {
+    if max_deletions.as_usize() >= input_length {
+        variant_buffer.fill(NULL_CHARACTER);
         chunk[0].write((
-            hash_string([], hash_builder),
+            hash_string(variant_buffer, hash_builder),
             CrossIndex::from(input_idx, is_ref),
         ));
         return;
     }
 
-    let mut variant_buffer = Vec::with_capacity(input_length - num_deletions);
-
-    for (variant_idx, deletion_indices) in (0..input_length).combinations(num_deletions).enumerate()
+    for (variant_idx, deletion_indices) in (0..input_length)
+        .combinations(max_deletions.as_usize())
+        .enumerate()
     {
         variant_buffer.clear();
-        let mut offset = 0;
+        let mut cursor = 0;
 
         for idx in deletion_indices {
-            variant_buffer.extend_from_slice(&input.as_bytes()[offset..idx]);
-            offset = idx + 1;
+            variant_buffer.extend_from_slice(&input.as_bytes()[cursor..idx]);
+            variant_buffer.push(NULL_CHARACTER);
+            cursor = idx + 1;
         }
-        variant_buffer.extend_from_slice(&input.as_bytes()[offset..input_length]);
+        variant_buffer.extend_from_slice(&input.as_bytes()[cursor..input_length]);
 
         chunk[variant_idx].write((
             hash_string(&variant_buffer, hash_builder),
@@ -1553,16 +1559,16 @@ fn compute_dists_hamming(
 }
 
 /// Examine and double check hits to see if they are real, then collect into a tuple of vectors.
-fn collect_true_hits(
-    hit_candidates: &[(u32, u32)],
-    dists: &[u8],
+fn validate_and_collect_hits(
+    hit_candidates: Vec<(u32, u32)>,
+    dists: Vec<u8>,
     max_distance: MaxDistance,
 ) -> NeighborPairs {
     let mut qi_filtered = Vec::with_capacity(dists.len());
     let mut ri_filtered = Vec::with_capacity(dists.len());
     let mut dists_filtered = Vec::with_capacity(dists.len());
 
-    for (&(qi, ri), &d) in hit_candidates.iter().zip(dists.iter()) {
+    for ((qi, ri), d) in hit_candidates.into_iter().zip(dists) {
         if d > max_distance.as_u8() {
             continue;
         }
@@ -1674,7 +1680,7 @@ mod tests {
         ];
 
         for (candidates, dists, mdist, expected) in cases {
-            let result = collect_true_hits(&candidates, &dists, mdist);
+            let result = validate_and_collect_hits(candidates, dists, mdist);
             assert_eq!(result, expected);
         }
     }
