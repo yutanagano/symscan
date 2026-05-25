@@ -10,14 +10,17 @@
 //! input strings that share common deletion variants. This sort-and-scan approach trades off an
 //! additional factor of O(log N) (with N the total number of strings being compared) in expected
 //! time complexity for improved cache locality and effective parallelization, and ends up being
-//! much faster for the above use case. See [`get_neighbors_within`] and [`get_neighbors_across`]
+//! much faster for the above use case. The crate provides separate implementations for [Levenshtein
+//! edit distance](https://en.wikipedia.org/wiki/Levenshtein_distance) and [Hamming
+//! distance](https://en.wikipedia.org/wiki/Hamming_distance). See [`get_neighbors_within`] /
+//! [`get_hamming_neighbors_within`] and [`get_neighbors_across`] / [`get_hamming_neighbors_across`]
 //! for details on the API.
 //!
 //! Even for our intended use case of discovering pairs of similar strings from large collections,
-//! it is sometimes useful to memoize the deletion variant computations for at least one side of
-//! the query (e.g. reference-side memoization when making repeated queries against a very large
+//! it is sometimes useful to memoize the deletion variant computations for at least one side of the
+//! query (e.g. reference-side memoization when making repeated queries against a very large
 //! reference collection with relatively smaller query collections). For such cases, the library
-//! also provides the [`CachedRef`] struct.
+//! also provides the [`CachedRef`] / [`CachedRefHamming`] structs.
 
 use foldhash::fast::FixedState;
 use hashbrown::HashMap;
