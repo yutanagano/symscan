@@ -1,10 +1,82 @@
 use numpy::IntoPyArray;
 use pyo3::{
-    exceptions::PyValueError,
+    exceptions::{PyTypeError, PyValueError},
     prelude::*,
     types::{PyString, PyTuple},
 };
-use symscan;
+use symscan::NeighborPairs;
+
+enum CachedRefInternal {
+    Levenshtein(symscan::CachedRef),
+    Hamming(symscan::CachedRefHamming),
+}
+
+impl CachedRefInternal {
+    fn new(
+        reference: &[impl AsRef<str> + Sync],
+        max_distance: u8,
+        distance_type: &str,
+    ) -> PyResult<Self> {
+        match distance_type {
+            "levenshtein" => Ok(Self::Levenshtein(
+                symscan::CachedRef::new(reference, max_distance)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?,
+            )),
+            "hamming" => Ok(Self::Hamming(
+                symscan::CachedRefHamming::new(reference, max_distance)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?,
+            )),
+            _ => Err(PyValueError::new_err(
+                "distance_type must be either levenshtein or hamming",
+            )),
+        }
+    }
+
+    fn get_neighbors_within(&self, max_distance: u8) -> PyResult<NeighborPairs> {
+        match self {
+            Self::Levenshtein(x) => x.get_neighbors_within(max_distance),
+            Self::Hamming(x) => x.get_neighbors_within(max_distance),
+        }
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    fn get_neighbors_across(
+        &self,
+        query: &[impl AsRef<str> + Sync],
+        max_distance: u8,
+    ) -> PyResult<NeighborPairs> {
+        match self {
+            Self::Levenshtein(x) => x.get_neighbors_across(query, max_distance),
+            Self::Hamming(x) => x.get_neighbors_across(query, max_distance),
+        }
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    pub fn get_neighbors_across_cached(
+        &self,
+        query: &Self,
+        max_distance: u8,
+    ) -> PyResult<NeighborPairs> {
+        match self {
+            Self::Levenshtein(x) => match query {
+                Self::Levenshtein(y) => x
+                    .get_neighbors_across_cached(y, max_distance)
+                    .map_err(|e| PyValueError::new_err(e.to_string())),
+                _ => Err(PyTypeError::new_err(
+                    "CachedRefHamming cannot be used to query CachedRef",
+                )),
+            },
+            Self::Hamming(x) => match query {
+                Self::Hamming(y) => x
+                    .get_neighbors_across_cached(y, max_distance)
+                    .map_err(|e| PyValueError::new_err(e.to_string())),
+                _ => Err(PyTypeError::new_err(
+                    "CachedRef cannot be used to query CachedRefHamming",
+                )),
+            },
+        }
+    }
+}
 
 /// A class for memoizing the deletion variant calculations for a string collection.
 ///
@@ -23,24 +95,28 @@ use symscan;
 ///
 /// Parameters
 /// ----------
-/// reference : iterable of str
-/// max_distance : int, default=1
+/// reference
+/// max_distance
 ///     The maximum edit distance that this CachedRef instance will be able to support in future
 ///     queries.
+/// distance_type
+///     The string metric to use when measuring distance between input strings. When using Hamming
+///     distance, strings of different lengths will never be considered neighbors.
 #[pyclass]
 struct CachedRef {
-    internal: symscan::CachedRef,
+    internal: CachedRefInternal,
 }
 
 #[pymethods]
 impl CachedRef {
     #[new]
-    #[pyo3(signature = (reference, max_distance = 1))]
-    fn new(reference: &Bound<PyAny>, max_distance: u8) -> PyResult<Self> {
-        let ref_handles = get_pystring_handles(&reference)?;
+    #[pyo3(signature = (reference, max_distance = 1, distance_type = "levenshtein"))]
+    fn new(reference: &Bound<PyAny>, max_distance: u8, distance_type: &str) -> PyResult<Self> {
+        check_distance_type(distance_type)?;
+        let ref_handles = get_pystring_handles(reference)?;
         let ref_views = get_str_refs(&ref_handles)?;
 
-        let internal = symscan::CachedRef::new(&ref_views, max_distance)
+        let internal = CachedRefInternal::new(&ref_views, max_distance, distance_type)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
         Ok(CachedRef { internal })
@@ -86,14 +162,12 @@ impl CachedRef {
         py: Python<'py>,
         max_distance: u8,
     ) -> PyResult<Bound<'py, PyTuple>> {
-        let symscan::NeighborPairs { row, col, dists } = self
-            .internal
-            .get_neighbors_within(max_distance)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let symscan::NeighborPairs { row, col, dists } =
+            self.internal.get_neighbors_within(max_distance)?;
 
         PyTuple::new(
             py,
-            &[
+            [
                 row.into_pyarray(py).as_any(),
                 col.into_pyarray(py).as_any(),
                 dists.into_pyarray(py).as_any(),
@@ -156,14 +230,12 @@ impl CachedRef {
         let symscan::NeighborPairs { row, col, dists } = {
             if let Ok(cached) = query.cast::<CachedRef>() {
                 self.internal
-                    .get_neighbors_across_cached(&cached.borrow().internal, max_distance)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?
+                    .get_neighbors_across_cached(&cached.borrow().internal, max_distance)?
             } else if let Ok(iterable) = query.try_iter() {
                 let query_handles = get_pystring_handles(&iterable)?;
                 let query_views = get_str_refs(&query_handles)?;
                 self.internal
-                    .get_neighbors_across(&query_views, max_distance)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?
+                    .get_neighbors_across(&query_views, max_distance)?
             } else {
                 let type_name = query
                     .get_type()
@@ -178,7 +250,7 @@ impl CachedRef {
 
         PyTuple::new(
             py,
-            &[
+            [
                 row.into_pyarray(py).as_any(),
                 col.into_pyarray(py).as_any(),
                 dists.into_pyarray(py).as_any(),
@@ -249,7 +321,7 @@ fn get_neighbors_within<'py>(
     query: &Bound<'py, PyAny>,
     max_distance: u8,
 ) -> PyResult<Bound<'py, PyTuple>> {
-    let query_handles = get_pystring_handles(&query)?;
+    let query_handles = get_pystring_handles(query)?;
     let query_views = get_str_refs(&query_handles)?;
 
     let symscan::NeighborPairs { row, col, dists } =
@@ -258,7 +330,7 @@ fn get_neighbors_within<'py>(
 
     PyTuple::new(
         py,
-        &[
+        [
             row.into_pyarray(py).as_any(),
             col.into_pyarray(py).as_any(),
             dists.into_pyarray(py).as_any(),
@@ -321,7 +393,7 @@ fn get_neighbors_across<'py>(
     reference: Bound<'py, PyAny>,
     max_distance: u8,
 ) -> PyResult<Bound<'py, PyTuple>> {
-    let query_handles = get_pystring_handles(&query)?;
+    let query_handles = get_pystring_handles(query)?;
     let query_views = get_str_refs(&query_handles)?;
     let ref_handles = get_pystring_handles(&reference)?;
     let ref_views = get_str_refs(&ref_handles)?;
@@ -333,7 +405,7 @@ fn get_neighbors_across<'py>(
 
     PyTuple::new(
         py,
-        &[
+        [
             row.into_pyarray(py).as_any(),
             col.into_pyarray(py).as_any(),
             dists.into_pyarray(py).as_any(),
@@ -341,8 +413,17 @@ fn get_neighbors_across<'py>(
     )
 }
 
+fn check_distance_type(distance_type: &str) -> PyResult<()> {
+    match distance_type {
+        "levenshtein" | "hamming" => Ok(()),
+        _ => Err(PyValueError::new_err(
+            "distance_type must be either levenshtein or hamming",
+        )),
+    }
+}
+
 fn get_pystring_handles<'py>(input: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyString>>> {
-    if let Ok(_) = input.cast::<PyString>() {
+    if input.cast::<PyString>().is_ok() {
         Err(PyValueError::new_err("expected iterable of str, got str"))
     } else {
         input
