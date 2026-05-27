@@ -95,11 +95,13 @@ impl CachedRefInternal {
 ///
 /// Parameters
 /// ----------
-/// reference
-/// max_distance
+/// reference : iterable of str
+///
+/// max_distance : int, default=1
 ///     The maximum edit distance that this CachedRef instance will be able to support in future
 ///     queries.
-/// distance_type
+///
+/// distance_type : { "levenshtein", "hamming" }, default="levenshtein"
 ///     The string metric to use when measuring distance between input strings. When using Hamming
 ///     distance, strings of different lengths will never be considered neighbors.
 #[pyclass]
@@ -148,7 +150,18 @@ impl CachedRef {
     /// Look for pairs of similar strings within a string collection.
     ///
     /// >>> import symscan
-    /// >>> cached = symscan.CachedRef(["fizz", "fuzz", "buzz"])
+    /// >>> cached = symscan.CachedRef(["fizz", "fuzz", "buzz", "fizzy"])
+    /// >>> (row, col, dists) = cached.get_neighbors_within()
+    /// >>> row
+    /// array([0, 0, 1], dtype=uint32)
+    /// >>> col
+    /// array([1, 3, 2], dtype=uint32)
+    /// >>> dists
+    /// array([1, 1, 1], dtype=uint8)
+    ///
+    /// To use Hamming distance, this must be specified at construction time.
+    ///
+    /// >>> cached = symscan.CachedRef(["fizz", "fuzz", "buzz", "fizzy"], distance_type="hamming")
     /// >>> (row, col, dists) = cached.get_neighbors_within()
     /// >>> row
     /// array([0, 1], dtype=uint32)
@@ -180,6 +193,7 @@ impl CachedRef {
     /// Parameters
     /// ----------
     /// query : iterable of str or CachedRef
+    ///
     /// max_distance : int, default=1
     ///     The maximum edit distance at which strings are considered neighbours.
     ///
@@ -201,25 +215,36 @@ impl CachedRef {
     /// Look for pairs of similar strings across the cached reference and a query collection.
     ///
     /// >>> import symscan
-    /// >>> cached = symscan.CachedRef(["fooo", "barr", "bazz", "buzz"])
-    /// >>> (row, col, dists) = cached.get_neighbors_across(["fizz", "fuzz", "buzz"])
+    /// >>> cached = symscan.CachedRef(["foo", "bar", "baz", "buzz"])
+    /// >>> (row, col, dists) = cached.get_neighbors_across(["fizz", "fuzz", "buzz", "fizzy"])
     /// >>> row
-    /// array([1, 2, 2], dtype=uint32)
+    /// array([1, 2], dtype=uint32)
     /// >>> col
-    /// array([3, 2, 3], dtype=uint32)
+    /// array([3, 3], dtype=uint32)
     /// >>> dists
-    /// array([1, 1, 0], dtype=uint8)
+    /// array([1, 0], dtype=uint8)
     ///
     /// It is possible to use a CachedRef instance as the query collection as well.
     ///
-    /// >>> cached_query = symscan.CachedRef(["fizz", "fuzz", "buzz"])
+    /// >>> cached_query = symscan.CachedRef(["fizz", "fuzz", "buzz", "fizzy"])
     /// >>> (row, col, dists) = cached.get_neighbors_across(cached_query)
     /// >>> row
-    /// array([1, 2, 2], dtype=uint32)
+    /// array([1, 2], dtype=uint32)
     /// >>> col
-    /// array([3, 2, 3], dtype=uint32)
+    /// array([3, 3], dtype=uint32)
     /// >>> dists
-    /// array([1, 1, 0], dtype=uint8)
+    /// array([1, 0], dtype=uint8)
+    ///
+    /// To use Hamming distance, this must be specified at construction time.
+    ///
+    /// >>> cached = symscan.CachedRef(["foo", "bar", "baz", "buzz"], max_distance=2, distance_type="hamming")
+    /// >>> (row, col, dists) = cached.get_neighbors_across(["fizz", "fuzz", "buzz", "fizzy"], max_distance=2)
+    /// >>> row
+    /// array([0, 1, 2], dtype=uint32)
+    /// >>> col
+    /// array([3, 3, 3], dtype=uint32)
+    /// >>> dists
+    /// array([2, 1, 0], dtype=uint8)
     #[pyo3(signature = (query, max_distance = 1))]
     fn get_neighbors_across<'py>(
         &self,
@@ -262,8 +287,8 @@ impl CachedRef {
 /// Detect string pairs within an input collection that lie within a threshold edit distance.
 ///
 /// The function considers all possible combinations of string pairs from `query`, and returns all
-/// those where the two strings are no more than `max_distance` Levenshtein edit distance units
-/// apart.
+/// those where the two strings are no more than `max_distance` edit distance (either Levenshtein or
+/// Hamming) units apart.
 ///
 /// .. important::
 ///
@@ -275,8 +300,13 @@ impl CachedRef {
 /// Parameters
 /// ----------
 /// query : iterable of str
+///
 /// max_distance : int, default=1
 ///     The maximum edit distance at which strings are considered neighbours.
+///
+/// distance_type : { "levenshtein", "hamming" }, default="levenshtein"
+///     The string metric to use when measuring distance between input strings. When using Hamming
+///     distance, strings of different lengths will never be considered neighbors.
 ///
 /// Returns
 /// -------
@@ -297,36 +327,55 @@ impl CachedRef {
 /// `col` coordinate.
 ///
 /// >>> import symscan
-/// >>> (row, col, dists) = symscan.get_neighbors_within(["fizz", "fuzz", "buzz"])
+/// >>> (row, col, dists) = symscan.get_neighbors_within(["fizz", "fuzz", "buzz", "fizzy"])
+/// >>> row
+/// array([0, 0, 1], dtype=uint32)
+/// >>> col
+/// array([1, 3, 2], dtype=uint32)
+/// >>> dists
+/// array([1, 1, 1], dtype=uint8)
+///
+/// To increase the threshold at which string pairs are considered similar, set `max_distance`.
+///
+/// >>> (row, col, dists) = symscan.get_neighbors_within(["fizz", "fuzz", "buzz", "fizzy"], max_distance=2)
+/// >>> row
+/// array([0, 0, 0, 1, 1], dtype=uint32)
+/// >>> col
+/// array([1, 2, 3, 2, 3], dtype=uint32)
+/// >>> dists
+/// array([1, 2, 1, 1, 2], dtype=uint8)
+///
+/// Hamming distance can be used instead of Levenshtein distance.
+///
+/// >>> (row, col, dists) = symscan.get_neighbors_within(["fizz", "fuzz", "buzz", "fizzy"], distance_type="hamming")
 /// >>> row
 /// array([0, 1], dtype=uint32)
 /// >>> col
 /// array([1, 2], dtype=uint32)
 /// >>> dists
 /// array([1, 1], dtype=uint8)
-///
-/// To increase the threshold at which string pairs are considered similar, set `max_distance`.
-///
-/// >>> (row, col, dists) = symscan.get_neighbors_within(["fizz", "fuzz", "buzz"], max_distance=2)
-/// >>> row
-/// array([0, 0, 1], dtype=uint32)
-/// >>> col
-/// array([1, 2, 2], dtype=uint32)
-/// >>> dists
-/// array([1, 2, 1], dtype=uint8)
 #[pyfunction]
-#[pyo3(signature = (query, max_distance = 1))]
+#[pyo3(signature = (query, max_distance = 1, distance_type = "levenshtein"))]
 fn get_neighbors_within<'py>(
     py: Python<'py>,
     query: &Bound<'py, PyAny>,
     max_distance: u8,
+    distance_type: &str,
 ) -> PyResult<Bound<'py, PyTuple>> {
+    check_distance_type(distance_type)?;
     let query_handles = get_pystring_handles(query)?;
     let query_views = get_str_refs(&query_handles)?;
 
-    let symscan::NeighborPairs { row, col, dists } =
-        symscan::get_neighbors_within(&query_views, max_distance)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let symscan::NeighborPairs { row, col, dists } = match distance_type {
+        "levenshtein" => symscan::get_neighbors_within(&query_views, max_distance),
+        "hamming" => symscan::get_hamming_neighbors_within(&query_views, max_distance),
+        _ => {
+            return Err(PyValueError::new_err(
+                "distance_type must be either levenshtein or hamming",
+            ))
+        }
+    }
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     PyTuple::new(
         py,
@@ -340,14 +389,16 @@ fn get_neighbors_within<'py>(
 
 /// Detect string pairs across two input collections that lie within a threshold edit distance.
 ///
-/// The function considers all string pairs in the cartesian product of `query` and `reference`,
-/// and returns all those where the two strings are no more than `max_distance` Levenshtein edit
-/// distance units apart.
+/// The function considers all string pairs in the cartesian product of `query` and `reference`, and
+/// returns all those where the two strings are no more than `max_distance` edit distance (either
+/// Levenshtein or Hamming) units apart.
 ///
 /// Parameters
 /// ----------
 /// query : iterable of str
+///
 /// reference : iterable of str
+///
 /// max_distance : int, default=1
 ///     The maximum edit distance at which strings are considered neighbors.
 ///
@@ -368,40 +419,58 @@ fn get_neighbors_within<'py>(
 /// --------
 /// Look for pairs of similar strings across two collections.
 ///
-/// >>> (row, col, dists) = symscan.get_neighbors_across(["fizz", "fuzz", "buzz"], ["fooo", "barr", "bazz", "buzz"])
+/// >>> (row, col, dists) = symscan.get_neighbors_across(["fizz", "fuzz", "buzz", "fizzy"], ["foo", "bar", "baz", "buzz"])
 /// >>> row
-/// array([1, 2, 2], dtype=uint32)
+/// array([1, 2], dtype=uint32)
 /// >>> col
-/// array([3, 2, 3], dtype=uint32)
+/// array([3, 3], dtype=uint32)
 /// >>> dists
-/// array([1, 1, 0], dtype=uint8)
+/// array([1, 0], dtype=uint8)
 ///
 /// To increase the threshold at which string pairs are considered similar, set `max_distance`.
 ///
-/// >>> (row, col, dists) = symscan.get_neighbors_across(["fizz", "fuzz", "buzz"], ["fooo", "barr", "bazz", "buzz"], max_distance=2)
+/// >>> (row, col, dists) = symscan.get_neighbors_across(["fizz", "fuzz", "buzz", "fizzy"], ["foo", "bar", "baz", "buzz"], max_distance=2)
 /// >>> row
-/// array([0, 0, 1, 1, 2, 2], dtype=uint32)
+/// array([0, 1, 2, 2], dtype=uint32)
 /// >>> col
-/// array([2, 3, 2, 3, 2, 3], dtype=uint32)
+/// array([3, 3, 2, 3], dtype=uint32)
 /// >>> dists
-/// array([2, 2, 2, 1, 1, 0], dtype=uint8)
+/// array([2, 1, 2, 0], dtype=uint8)
+///
+/// Hamming distance can be used instead of Levenshtein distance.
+///
+/// >>> (row, col, dists) = symscan.get_neighbors_across(["fizz", "fuzz", "buzz", "fizzy"], ["foo", "bar", "baz", "buzz"], max_distance=2, distance_type="hamming")
+/// >>> row
+/// array([0, 1, 2], dtype=uint32)
+/// >>> col
+/// array([3, 3, 3], dtype=uint32)
+/// >>> dists
+/// array([2, 1, 0], dtype=uint8)
 #[pyfunction]
-#[pyo3(signature = (query, reference, max_distance = 1))]
+#[pyo3(signature = (query, reference, max_distance = 1, distance_type = "levenshtein"))]
 fn get_neighbors_across<'py>(
     py: Python<'py>,
     query: &Bound<'py, PyAny>,
     reference: Bound<'py, PyAny>,
     max_distance: u8,
+    distance_type: &str,
 ) -> PyResult<Bound<'py, PyTuple>> {
+    check_distance_type(distance_type)?;
     let query_handles = get_pystring_handles(query)?;
     let query_views = get_str_refs(&query_handles)?;
     let ref_handles = get_pystring_handles(&reference)?;
     let ref_views = get_str_refs(&ref_handles)?;
 
-    let symscan::NeighborPairs { row, col, dists } = {
-        symscan::get_neighbors_across(&query_views, &ref_views, max_distance)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?
-    };
+    let symscan::NeighborPairs { row, col, dists } = match distance_type {
+        "levenshtein" => symscan::get_neighbors_across(&query_views, &ref_views, max_distance),
+        "hamming" => symscan::get_hamming_neighbors_across(&query_views, &ref_views, max_distance),
+        _ => {
+            return Err(PyValueError::new_err(
+                "distance_type must be either levenshtein or hamming",
+            ))
+        }
+    }
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     PyTuple::new(
         py,
