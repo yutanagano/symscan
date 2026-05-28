@@ -195,7 +195,8 @@ impl CachedRef {
     /// query : iterable of str or CachedRef
     ///
     /// max_distance : int, default=1
-    ///     The maximum edit distance at which strings are considered neighbours.
+    ///     The maximum edit distance at which strings are considered neighbours. This must not be
+    ///     greater than the `max_distance` specified when constructing the caller instance.
     ///
     /// Returns
     /// -------
