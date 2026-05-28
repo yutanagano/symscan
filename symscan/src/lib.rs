@@ -1074,7 +1074,8 @@ impl CachedRefHamming {
     }
 }
 
-/// Detect string pairs within an input collection that lie within a threshold edit distance.
+/// Detect string pairs within an input collection that lie within a threshold Levenshtein edit
+/// distance.
 ///
 /// The function considers all possible combinations (not permutations, [read
 /// more](NeighborPairs#a-note-on-double-counting-pairs)) of string pairs from `query`, and returns
@@ -1152,7 +1153,8 @@ pub fn get_neighbors_within(
     Ok(validate_and_collect_hits(candidates, dists, max_distance))
 }
 
-/// Detect string pairs across two input collections that lie within a threshold edit distance.
+/// Detect string pairs across two input collections that lie within a threshold Levenshtein edit
+/// distance.
 ///
 /// The function considers all string pairs in the cartesian product of `query` and `reference`,
 /// and returns all those where the two strings are no more than `max_distance` Levenshtein edit
