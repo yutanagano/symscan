@@ -1,6 +1,10 @@
-## Version 0.7.3
+## Version 0.8.0
 
-- Start using stable Python ABI for Python bindings (locked at v >= 3.10 for now)
+- Implement optimised Hamming distance versions of the functions as well as a
+  cached Hamming implementation (as opposed to the default Levenshtein distance
+  versions)
+- Start using stable Python ABI for Python bindings (locked at v >= 3.10 for
+  now)
 
 ## Version 0.7.2
 

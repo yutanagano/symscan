@@ -3,7 +3,10 @@ use rayon::ThreadPoolBuilder;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Error, ErrorKind::InvalidData, Write};
 use std::process;
-use symscan::{get_neighbors_across, get_neighbors_within, NeighborPairs};
+use symscan::{
+    get_hamming_neighbors_across, get_hamming_neighbors_within, get_neighbors_across,
+    get_neighbors_within, NeighborPairs,
+};
 
 /// Minimal CLI utility for fast discovery of nearest neighbour strings that fall within a
 /// threshold edit distance.
@@ -16,7 +19,9 @@ use symscan::{get_neighbors_across, get_neighbors_within, NeighborPairs};
 /// strings across the contents of the two files. Currently, only valid ASCII input is supported.
 ///
 /// By default, the threshold (Levenshtein) edit distance at or below which a pair of strings are
-/// considered similar is set at 1. This can be changed by setting the --max-distance option.
+/// considered similar is set at 1. This can be changed by setting the --max-distance option. You
+/// can also limit the neighbor search to only consider substitutions (i.e. no insertions /
+/// deletions) by setting the --hamming option.
 ///
 /// Symscan's output is plain text, where each line encodes a detected pair of similar input
 /// strings. Each line is comprised of three integers separated by commas, which represent, in
@@ -27,9 +32,13 @@ use symscan::{get_neighbors_across, get_neighbors_within, NeighborPairs};
 #[derive(Debug, Parser)]
 #[command(version)]
 struct Args {
-    /// The maximum (Levenshtein) edit distance away to check for neighbours.
+    /// The maximum edit distance away to check for neighbours.
     #[arg(short = 'd', long, default_value_t = 1)]
     max_distance: u8,
+
+    /// Limit the neighbour search to only consider substitutions (i.e. use Hamming distance).
+    #[arg(long, action = ArgAction::SetTrue)]
+    hamming: bool,
 
     /// The number of OS threads the program spawns (if 0 spawns one thread per CPU core).
     #[arg(short, long, default_value_t = 0)]
@@ -90,18 +99,35 @@ fn main() {
                 process::exit(1);
             });
 
-            let hits =
+            let hits = if args.hamming {
+                get_hamming_neighbors_across(&query, &ref_input, args.max_distance).unwrap_or_else(
+                    |e| {
+                        eprintln!("{}", e);
+                        process::exit(1)
+                    },
+                )
+            } else {
                 get_neighbors_across(&query, &ref_input, args.max_distance).unwrap_or_else(|e| {
                     eprintln!("{}", e);
                     process::exit(1)
-                });
+                })
+            };
+
             write_true_hits(hits, args.zero_index, &mut stdout);
         }
         None => {
-            let hits = get_neighbors_within(&query, args.max_distance).unwrap_or_else(|e| {
-                eprintln!("{}", e);
-                process::exit(1)
-            });
+            let hits = if args.hamming {
+                get_hamming_neighbors_within(&query, args.max_distance).unwrap_or_else(|e| {
+                    eprintln!("{}", e);
+                    process::exit(1)
+                })
+            } else {
+                get_neighbors_within(&query, args.max_distance).unwrap_or_else(|e| {
+                    eprintln!("{}", e);
+                    process::exit(1)
+                })
+            };
+
             write_true_hits(hits, args.zero_index, &mut stdout);
         }
     };

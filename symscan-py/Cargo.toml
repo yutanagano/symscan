@@ -8,7 +8,7 @@ repository = "https://github.com/yutanagano/symscan"
 homepage = "https://github.com/yutanagano/symscan"
 
 [dependencies]
-symscan = { version = "0.7", path = "../symscan/" }
+symscan = { version = "0.8", path = "../symscan/" }
 pyo3 = { version = "0.27", features = ["abi3-py310"] }
 numpy = "0.27"
 

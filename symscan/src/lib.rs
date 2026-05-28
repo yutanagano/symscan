@@ -10,19 +10,22 @@
 //! input strings that share common deletion variants. This sort-and-scan approach trades off an
 //! additional factor of O(log N) (with N the total number of strings being compared) in expected
 //! time complexity for improved cache locality and effective parallelization, and ends up being
-//! much faster for the above use case. See [`get_neighbors_within`] and [`get_neighbors_across`]
+//! much faster for the above use case. The crate provides separate implementations for [Levenshtein
+//! edit distance](https://en.wikipedia.org/wiki/Levenshtein_distance) and [Hamming
+//! distance](https://en.wikipedia.org/wiki/Hamming_distance). See [`get_neighbors_within`] /
+//! [`get_hamming_neighbors_within`] and [`get_neighbors_across`] / [`get_hamming_neighbors_across`]
 //! for details on the API.
 //!
 //! Even for our intended use case of discovering pairs of similar strings from large collections,
-//! it is sometimes useful to memoize the deletion variant computations for at least one side of
-//! the query (e.g. reference-side memoization when making repeated queries against a very large
+//! it is sometimes useful to memoize the deletion variant computations for at least one side of the
+//! query (e.g. reference-side memoization when making repeated queries against a very large
 //! reference collection with relatively smaller query collections). For such cases, the library
-//! also provides the [`CachedRef`] struct.
+//! also provides the [`CachedRef`] / [`CachedRefHamming`] structs.
 
 use foldhash::fast::FixedState;
 use hashbrown::HashMap;
 use itertools::Itertools;
-use rapidfuzz::distance::levenshtein;
+use rapidfuzz::distance::{hamming, levenshtein};
 use rayon::prelude::*;
 use std::fmt::Display;
 use std::hash::{BuildHasher, Hasher};
@@ -262,24 +265,24 @@ impl NeighborPairs {
 /// ```
 /// use symscan::{CachedRef, NeighborPairs};
 ///
-/// let reference = ["fooo", "barr", "bazz", "buzz"];
+/// let reference = ["foo", "bar", "baz", "buzz"];
 /// let cached = CachedRef::new(&reference, 2).unwrap();
 ///
 /// let NeighborPairs { row, col, dists } = cached
-///     .get_neighbors_across(&["fizz", "fuzz", "buzz"], 1)
+///     .get_neighbors_across(&["fizz", "fuzz", "buzz", "fizzy"], 1)
 ///     .unwrap();
 ///
-/// assert_eq!(row,   vec![1, 2, 2]);
-/// assert_eq!(col,   vec![3, 2, 3]);
-/// assert_eq!(dists, vec![1, 1, 0]);
+/// assert_eq!(row,   vec![1, 2]);
+/// assert_eq!(col,   vec![3, 3]);
+/// assert_eq!(dists, vec![1, 0]);
 ///
 /// let NeighborPairs { row, col, dists } = cached
-///     .get_neighbors_across(&["fizz", "fuzz", "buzz"], 2)
+///     .get_neighbors_across(&["fizz", "fuzz", "buzz", "fizzy"], 2)
 ///     .unwrap();
 ///
-/// assert_eq!(row,   vec![0, 0, 1, 1, 2, 2]);
-/// assert_eq!(col,   vec![2, 3, 2, 3, 2, 3]);
-/// assert_eq!(dists, vec![2, 2, 2, 1, 1, 0]);
+/// assert_eq!(row,   vec![0, 1, 2, 2]);
+/// assert_eq!(col,   vec![3, 3, 2, 3]);
+/// assert_eq!(dists, vec![2, 1, 2, 0]);
 /// ```
 pub struct CachedRef {
     str_store: Vec<u8>,
@@ -332,7 +335,7 @@ impl CachedRef {
         let hash_builder = FixedState::default();
 
         let (index_store, convergence_groups) = {
-            let num_vars_per_string = get_num_del_vars_per_string(reference, max_distance);
+            let num_vars_per_string = get_num_del_vars_per_string_up_to(reference, max_distance);
 
             let mut variant_index_pairs_uninit =
                 prealloc_maybeuninit_vec::<(u64, u32)>(num_vars_per_string.iter().sum());
@@ -424,7 +427,7 @@ impl CachedRef {
         let candidates = get_hit_candidates_within(&convergent_indices);
         let dists = self.compute_dists_fully_cached(&candidates, self, max_distance);
 
-        Ok(collect_true_hits(&candidates, &dists, max_distance))
+        Ok(validate_and_collect_hits(candidates, dists, max_distance))
     }
 
     /// The memoized equivalent of [`get_neighbors_across`].
@@ -450,7 +453,7 @@ impl CachedRef {
         check_strings_ascii(query, InputType::Query)?;
 
         let (q_idx_store, convergence_groups) = {
-            let num_vars_per_string = get_num_del_vars_per_string(query, max_distance);
+            let num_vars_per_string = get_num_del_vars_per_string_up_to(query, max_distance);
 
             let mut variant_index_pairs_uninit =
                 prealloc_maybeuninit_vec(num_vars_per_string.iter().sum());
@@ -522,7 +525,7 @@ impl CachedRef {
         let candidates = get_hit_candidates_across(&convergence_groups);
         let dists = self.compute_dists_partially_cached(&candidates, query, max_distance);
 
-        Ok(collect_true_hits(&candidates, &dists, max_distance))
+        Ok(validate_and_collect_hits(candidates, dists, max_distance))
     }
 
     /// Equivalent to [`CachedRef::get_neighbors_across`], where the query is also a [`CachedRef`]
@@ -593,7 +596,7 @@ impl CachedRef {
         let candidates = get_hit_candidates_across(&convergence_groups);
         let dists = self.compute_dists_fully_cached(&candidates, query, max_distance);
 
-        Ok(collect_true_hits(&candidates, &dists, max_distance))
+        Ok(validate_and_collect_hits(candidates, dists, max_distance))
     }
 
     #[inline(always)]
@@ -659,7 +662,420 @@ impl CachedRef {
     }
 }
 
-/// Detect string pairs within an input collection that lie within a threshold edit distance.
+/// A version of [`CachedRef`] but for Hamming distance instead of Levenshtein distance.
+///
+/// # Examples
+///
+/// ```
+/// use symscan::{CachedRefHamming, NeighborPairs};
+///
+/// let reference = ["foo", "bar", "baz", "buzz"];
+/// let cached_hamming = CachedRefHamming::new(&reference, 2).unwrap();
+///
+/// let NeighborPairs { row, col, dists } = cached_hamming
+///     .get_neighbors_across(&["fizz", "fuzz", "buzz", "fizzy"], 1)
+///     .unwrap();
+///
+/// assert_eq!(row,   vec![1, 2]);
+/// assert_eq!(col,   vec![3, 3]);
+/// assert_eq!(dists, vec![1, 0]);
+///
+/// let NeighborPairs { row, col, dists } = cached_hamming
+///     .get_neighbors_across(&["fizz", "fuzz", "buzz", "fizzy"], 2)
+///     .unwrap();
+///
+/// assert_eq!(row,   vec![0, 1, 2]);
+/// assert_eq!(col,   vec![3, 3, 3]);
+/// assert_eq!(dists, vec![2, 1, 0]);
+/// ```
+pub struct CachedRefHamming {
+    str_store: Vec<u8>,
+    str_spans: Vec<Span>,
+    index_store: Vec<u32>,
+    variant_map: HashMap<u64, Span, IdentityHasherBuilder>,
+    max_distance: MaxDistance,
+}
+
+impl CachedRefHamming {
+    /// Construct a new [`CachedRefHamming`] instance.
+    pub fn new(reference: &[impl AsRef<str> + Sync], max_distance: u8) -> Result<Self, Error> {
+        if reference.len() > u32::MAX as usize {
+            return Err(Error::TooManyStrings {
+                input_type: InputType::Reference,
+                got: reference.len(),
+                limit: u32::MAX as usize,
+            });
+        }
+        let max_distance = MaxDistance::try_from(max_distance)?;
+        check_strings_ascii(reference, InputType::Reference)?;
+
+        let (str_store, str_spans) = {
+            let strlens = reference.iter().map(|s| s.as_ref().len()).collect_vec();
+
+            let mut str_store_uninit = prealloc_maybeuninit_vec(strlens.iter().sum());
+            let str_spans = get_disjoint_spans(&strlens);
+            let str_store_chunks = get_disjoint_chunks_mut(&strlens, &mut str_store_uninit[..]);
+
+            reference
+                .par_iter()
+                .zip(str_store_chunks.into_par_iter())
+                .with_min_len(100000)
+                .for_each(|(s, chunk)| {
+                    debug_assert_eq!(s.as_ref().len(), chunk.len());
+                    unsafe {
+                        ptr::copy_nonoverlapping(
+                            s.as_ref().as_ptr(),
+                            chunk.as_mut_ptr() as *mut u8,
+                            s.as_ref().len(),
+                        )
+                    };
+                });
+
+            let str_store = unsafe { cast_to_initialised_vec(str_store_uninit) };
+
+            (str_store, str_spans)
+        };
+
+        let hash_builder = FixedState::default();
+
+        let (index_store, convergence_groups) = {
+            let num_vars_per_string = get_num_del_vars_per_string_up_to(reference, max_distance);
+
+            let mut variant_index_pairs_uninit =
+                prealloc_maybeuninit_vec::<(u64, u32)>(num_vars_per_string.iter().sum());
+            let vip_chunks =
+                get_disjoint_chunks_mut(&num_vars_per_string, &mut variant_index_pairs_uninit[..]);
+
+            reference
+                .par_iter()
+                .zip(vip_chunks.into_par_iter())
+                .enumerate()
+                .with_min_len(100000)
+                .for_each(|(idx, (s, chunk))| {
+                    write_vi_pairs_cached_hamming(
+                        s.as_ref(),
+                        idx as u32,
+                        max_distance,
+                        chunk,
+                        &hash_builder,
+                    );
+                });
+
+            let mut variant_index_pairs =
+                unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
+
+            variant_index_pairs.par_sort_unstable();
+            variant_index_pairs.dedup();
+
+            let mut total_num_convergent_indices = 0;
+            let mut num_convergence_groups = 0;
+
+            variant_index_pairs
+                .chunk_by(|(v1, _), (v2, _)| v1 == v2)
+                .for_each(|chunk| {
+                    total_num_convergent_indices += chunk.len();
+                    num_convergence_groups += 1;
+                });
+
+            let mut convergent_indices = Vec::with_capacity(total_num_convergent_indices);
+            let mut convergence_groups = Vec::with_capacity(num_convergence_groups);
+            let mut cursor = 0;
+
+            variant_index_pairs
+                .chunk_by(|(v1, _), (v2, _)| v1 == v2)
+                .for_each(|chunk| {
+                    convergent_indices.extend(chunk.iter().map(|&(_, i)| i));
+                    convergence_groups.push((chunk[0].0, Span::new(cursor, chunk.len())));
+                    cursor += chunk.len();
+                });
+
+            debug_assert_eq!(cursor, convergent_indices.len());
+
+            (convergent_indices, convergence_groups)
+        };
+
+        let mut variant_map =
+            HashMap::with_capacity_and_hasher(convergence_groups.len(), IdentityHasherBuilder);
+
+        for (v_hash, index_range) in convergence_groups {
+            variant_map.entry(v_hash).insert(index_range);
+        }
+
+        Ok(CachedRefHamming {
+            str_store,
+            str_spans,
+            index_store,
+            variant_map,
+            max_distance,
+        })
+    }
+
+    /// The memoized equivalent of [`get_hamming_neighbors_within`].
+    pub fn get_neighbors_within(&self, max_distance: u8) -> Result<NeighborPairs, Error> {
+        let max_distance = MaxDistance::try_from(max_distance)?;
+        if max_distance > self.max_distance {
+            return Err(Error::MaxDistTooLargeForCache {
+                got: max_distance.as_u8(),
+                limit: self.max_distance.as_u8(),
+            });
+        }
+
+        let mut convergent_indices = Vec::with_capacity(self.variant_map.len());
+        self.variant_map.iter().for_each(|(_, span)| {
+            if span.len() == 1 {
+                return;
+            }
+            convergent_indices.push(self.get_convergent_indices_from_span(span));
+        });
+
+        let candidates = get_hit_candidates_within(&convergent_indices);
+        let dists = self.compute_dists_fully_cached(&candidates, self, max_distance);
+
+        Ok(validate_and_collect_hits(candidates, dists, max_distance))
+    }
+
+    /// The memoized equivalent of [`get_hamming_neighbors_across`].
+    pub fn get_neighbors_across(
+        &self,
+        query: &[impl AsRef<str> + Sync],
+        max_distance: u8,
+    ) -> Result<NeighborPairs, Error> {
+        let max_distance = MaxDistance::try_from(max_distance)?;
+        if max_distance > self.max_distance {
+            return Err(Error::MaxDistTooLargeForCache {
+                got: max_distance.as_u8(),
+                limit: self.max_distance.as_u8(),
+            });
+        }
+        if query.len() > u32::MAX as usize {
+            return Err(Error::TooManyStrings {
+                input_type: InputType::Query,
+                got: query.len(),
+                limit: u32::MAX as usize,
+            });
+        }
+        check_strings_ascii(query, InputType::Query)?;
+
+        let (q_idx_store, convergence_groups) = {
+            let num_vars_per_string = get_num_del_vars_per_string_at(query, max_distance);
+
+            let mut variant_index_pairs_uninit =
+                prealloc_maybeuninit_vec(num_vars_per_string.iter().sum());
+            let vip_chunks =
+                get_disjoint_chunks_mut(&num_vars_per_string, &mut variant_index_pairs_uninit[..]);
+
+            let hash_builder = FixedState::default();
+
+            query
+                .par_iter()
+                .zip(vip_chunks.into_par_iter())
+                .enumerate()
+                .with_min_len(100000)
+                .for_each(|(idx, (s, chunk))| {
+                    write_vi_pairs_rawidx_hamming(
+                        s.as_ref(),
+                        idx as u32,
+                        max_distance,
+                        chunk,
+                        &hash_builder,
+                    );
+                });
+
+            let mut variant_index_pairs =
+                unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
+
+            variant_index_pairs.par_sort_unstable();
+            variant_index_pairs.dedup();
+
+            let mut total_num_convergent_q_indices = 0;
+            let mut num_convergence_groups = 0;
+
+            variant_index_pairs
+                .chunk_by(|(v1, _), (v2, _)| v1 == v2)
+                .for_each(|chunk| {
+                    let variant = &chunk[0].0;
+                    if self.variant_map.get(variant).is_some() {
+                        total_num_convergent_q_indices += chunk.len();
+                        num_convergence_groups += 1;
+                    }
+                });
+
+            let mut q_idx_store = Vec::with_capacity(total_num_convergent_q_indices);
+            let mut convergence_groups = Vec::with_capacity(num_convergence_groups);
+            let mut cursor = 0;
+
+            variant_index_pairs
+                .chunk_by(|(v1, _), (v2, _)| v1 == v2)
+                .for_each(|chunk| {
+                    let variant = &chunk[0].0;
+                    if let Some(span) = self.variant_map.get(variant) {
+                        q_idx_store.extend(chunk.iter().map(|&(_, i)| i));
+                        convergence_groups.push((
+                            cursor..cursor + chunk.len(),
+                            self.get_convergent_indices_from_span(span),
+                        ));
+                        cursor += chunk.len();
+                    }
+                });
+
+            (q_idx_store, convergence_groups)
+        };
+
+        let convergence_groups = convergence_groups
+            .into_iter()
+            .map(|(r, s)| (&q_idx_store[r], s))
+            .collect_vec();
+
+        let candidates = get_hit_candidates_across(&convergence_groups);
+        let dists = self.compute_dists_partially_cached(&candidates, query, max_distance);
+
+        Ok(validate_and_collect_hits(candidates, dists, max_distance))
+    }
+
+    /// Equivalent to [`CachedRefHamming::get_neighbors_across`], where the query is also a
+    /// [`CachedRefHamming`] instance.
+    pub fn get_neighbors_across_cached(
+        &self,
+        query: &Self,
+        max_distance: u8,
+    ) -> Result<NeighborPairs, Error> {
+        let max_distance = MaxDistance::try_from(max_distance)?;
+        if max_distance > self.max_distance {
+            return Err(Error::MaxDistTooLargeForCache {
+                got: max_distance.as_u8(),
+                limit: self.max_distance.as_u8(),
+            });
+        }
+        if max_distance > query.max_distance {
+            return Err(Error::MaxDistTooLargeForCache {
+                got: max_distance.as_u8(),
+                limit: query.max_distance.as_u8(),
+            });
+        }
+
+        let convergence_groups = if query.variant_map.len() < self.variant_map.len() {
+            let mut num_convergence_groups = 0;
+
+            query.variant_map.iter().for_each(|(variant, _)| {
+                if self.variant_map.get(variant).is_some() {
+                    num_convergence_groups += 1;
+                }
+            });
+
+            let mut convergence_groups = Vec::with_capacity(num_convergence_groups);
+
+            query.variant_map.iter().for_each(|(variant, span_q)| {
+                if let Some(span_r) = self.variant_map.get(variant) {
+                    convergence_groups.push((
+                        query.get_convergent_indices_from_span(span_q),
+                        self.get_convergent_indices_from_span(span_r),
+                    ));
+                }
+            });
+
+            convergence_groups
+        } else {
+            let mut num_convergence_groups = 0;
+
+            self.variant_map.iter().for_each(|(variant, _)| {
+                if query.variant_map.get(variant).is_some() {
+                    num_convergence_groups += 1;
+                }
+            });
+
+            let mut convergence_groups = Vec::with_capacity(num_convergence_groups);
+
+            self.variant_map.iter().for_each(|(variant, span_r)| {
+                if let Some(span_q) = query.variant_map.get(variant) {
+                    convergence_groups.push((
+                        query.get_convergent_indices_from_span(span_q),
+                        self.get_convergent_indices_from_span(span_r),
+                    ));
+                }
+            });
+
+            convergence_groups
+        };
+
+        let candidates = get_hit_candidates_across(&convergence_groups);
+        let dists = self.compute_dists_fully_cached(&candidates, query, max_distance);
+
+        Ok(validate_and_collect_hits(candidates, dists, max_distance))
+    }
+
+    #[inline(always)]
+    fn get_convergent_indices_from_span(&self, span: &Span) -> &[u32] {
+        &self.index_store[span.as_range()]
+    }
+
+    #[inline(always)]
+    fn get_str_at_index(&self, i: usize) -> &str {
+        unsafe { str::from_utf8_unchecked(&self.str_store[self.str_spans[i].as_range()]) }
+    }
+
+    fn compute_dists_partially_cached(
+        &self,
+        hit_candidates: &[(u32, u32)],
+        query: &[impl AsRef<str> + Sync],
+        max_distance: MaxDistance,
+    ) -> Vec<u8> {
+        hit_candidates
+            .par_iter()
+            .with_min_len(100000)
+            .map(|&(idx_query, idx_reference)| {
+                debug_assert_eq!(
+                    query[idx_query as usize].as_ref().len(),
+                    self.get_str_at_index(idx_reference as usize).len()
+                );
+
+                match unsafe {
+                    hamming::distance_with_args(
+                        query[idx_query as usize].as_ref().bytes(),
+                        self.get_str_at_index(idx_reference as usize).bytes(),
+                        &hamming::Args::default().score_cutoff(max_distance.as_usize()),
+                    )
+                    .unwrap_unchecked()
+                } {
+                    None => u8::MAX,
+                    Some(dist) => dist as u8,
+                }
+            })
+            .collect()
+    }
+
+    fn compute_dists_fully_cached(
+        &self,
+        hit_candidates: &[(u32, u32)],
+        query: &Self,
+        max_distance: MaxDistance,
+    ) -> Vec<u8> {
+        hit_candidates
+            .par_iter()
+            .with_min_len(100000)
+            .map(|&(idx_query, idx_reference)| {
+                debug_assert_eq!(
+                    query.get_str_at_index(idx_query as usize).len(),
+                    self.get_str_at_index(idx_reference as usize).len()
+                );
+
+                match unsafe {
+                    hamming::distance_with_args(
+                        query.get_str_at_index(idx_query as usize).bytes(),
+                        self.get_str_at_index(idx_reference as usize).bytes(),
+                        &hamming::Args::default().score_cutoff(max_distance.as_usize()),
+                    )
+                    .unwrap_unchecked()
+                } {
+                    None => u8::MAX,
+                    Some(dist) => dist as u8,
+                }
+            })
+            .collect()
+    }
+}
+
+/// Detect string pairs within an input collection that lie within a threshold Levenshtein edit
+/// distance.
 ///
 /// The function considers all possible combinations (not permutations, [read
 /// more](NeighborPairs#a-note-on-double-counting-pairs)) of string pairs from `query`, and returns
@@ -680,18 +1096,18 @@ impl CachedRef {
 /// ```
 /// use symscan::{get_neighbors_within, NeighborPairs};
 ///
-/// let query = ["fizz", "fuzz", "buzz"];
+/// let query = ["fizz", "fuzz", "buzz", "fizzy"];
 /// let NeighborPairs { row, col, dists } = get_neighbors_within(&query, 1).unwrap();
 ///
-/// assert_eq!(row,   vec![0, 1]);
-/// assert_eq!(col,   vec![1, 2]);
-/// assert_eq!(dists, vec![1, 1]);
+/// assert_eq!(row,   vec![0, 0, 1]);
+/// assert_eq!(col,   vec![1, 3, 2]);
+/// assert_eq!(dists, vec![1, 1, 1]);
 ///
 /// let NeighborPairs { row, col, dists } = get_neighbors_within(&query, 2).unwrap();
 ///
-/// assert_eq!(row,   vec![0, 0, 1]);
-/// assert_eq!(col,   vec![1, 2, 2]);
-/// assert_eq!(dists, vec![1, 2, 1]);
+/// assert_eq!(row,   vec![0, 0, 0, 1, 1]);
+/// assert_eq!(col,   vec![1, 2, 3, 2, 3]);
+/// assert_eq!(dists, vec![1, 2, 1, 1, 2]);
 /// ```
 pub fn get_neighbors_within(
     query: &[impl AsRef<str> + Sync],
@@ -708,7 +1124,7 @@ pub fn get_neighbors_within(
     check_strings_ascii(query, InputType::Query)?;
 
     let (convergent_indices, group_sizes) = {
-        let num_vars_per_string = get_num_del_vars_per_string(query, max_distance);
+        let num_vars_per_string = get_num_del_vars_per_string_up_to(query, max_distance);
 
         let mut variant_index_pairs_uninit =
             prealloc_maybeuninit_vec(num_vars_per_string.iter().sum());
@@ -726,54 +1142,19 @@ pub fn get_neighbors_within(
                 write_vi_pairs_rawidx(s.as_ref(), idx as u32, max_distance, chunk, &hash_builder);
             });
 
-        let mut variant_index_pairs =
-            unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
-
-        variant_index_pairs.par_sort_unstable();
-        variant_index_pairs.dedup();
-
-        let mut total_num_convergent_indices = 0;
-        let mut num_convergence_groups = 0;
-
-        variant_index_pairs
-            .chunk_by(|(v1, _), (v2, _)| v1 == v2)
-            .filter(|chunk| chunk.len() > 1)
-            .for_each(|chunk| {
-                total_num_convergent_indices += chunk.len();
-                num_convergence_groups += 1;
-            });
-
-        let mut convergent_indices = Vec::with_capacity(total_num_convergent_indices);
-        let mut convergence_group_sizes = Vec::with_capacity(num_convergence_groups);
-
-        variant_index_pairs
-            .chunk_by(|(v1, _), (v2, _)| v1 == v2)
-            .filter(|chunk| chunk.len() > 1)
-            .for_each(|chunk| {
-                convergent_indices.extend(chunk.iter().map(|&(_, i)| i));
-                convergence_group_sizes.push(chunk.len());
-            });
-
-        (convergent_indices, convergence_group_sizes)
+        let variant_index_pairs = unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
+        collect_convergent_indices(variant_index_pairs)
     };
 
-    let mut convergent_chunks = Vec::with_capacity(group_sizes.len());
-    let mut remaining = &convergent_indices[..];
-    for n in group_sizes {
-        let (chunk, rest) = remaining.split_at(n);
-        convergent_chunks.push(chunk);
-        remaining = rest;
-    }
-
-    debug_assert_eq!(remaining.len(), 0);
-
+    let convergent_chunks = get_convergent_chunks(&group_sizes, &convergent_indices[..]);
     let candidates = get_hit_candidates_within(&convergent_chunks);
-    let dists = compute_dists(&candidates, query, query, max_distance);
+    let dists = compute_dists_levenshtein(&candidates, query, query, max_distance);
 
-    Ok(collect_true_hits(&candidates, &dists, max_distance))
+    Ok(validate_and_collect_hits(candidates, dists, max_distance))
 }
 
-/// Detect string pairs across two input collections that lie within a threshold edit distance.
+/// Detect string pairs across two input collections that lie within a threshold Levenshtein edit
+/// distance.
 ///
 /// The function considers all string pairs in the cartesian product of `query` and `reference`,
 /// and returns all those where the two strings are no more than `max_distance` Levenshtein edit
@@ -793,19 +1174,19 @@ pub fn get_neighbors_within(
 /// ```
 /// use symscan::{get_neighbors_across, NeighborPairs};
 ///
-/// let query = ["fizz", "fuzz", "buzz"];
-/// let reference = ["fooo", "barr", "bazz", "buzz"];
+/// let query = ["fizz", "fuzz", "buzz", "fizzy"];
+/// let reference = ["foo", "bar", "baz", "buzz"];
 /// let NeighborPairs { row, col, dists } = get_neighbors_across(&query, &reference, 1).unwrap();
 ///
-/// assert_eq!(row,   vec![1, 2, 2]);
-/// assert_eq!(col,   vec![3, 2, 3]);
-/// assert_eq!(dists, vec![1, 1, 0]);
+/// assert_eq!(row,   vec![1, 2]);
+/// assert_eq!(col,   vec![3, 3]);
+/// assert_eq!(dists, vec![1, 0]);
 ///
 /// let NeighborPairs { row, col, dists } = get_neighbors_across(&query, &reference, 2).unwrap();
 ///
-/// assert_eq!(row,   vec![0, 0, 1, 1, 2, 2]);
-/// assert_eq!(col,   vec![2, 3, 2, 3, 2, 3]);
-/// assert_eq!(dists, vec![2, 2, 2, 1, 1, 0]);
+/// assert_eq!(row,   vec![0, 1, 2, 2]);
+/// assert_eq!(col,   vec![3, 3, 2, 3]);
+/// assert_eq!(dists, vec![2, 1, 2, 0]);
 /// ```
 pub fn get_neighbors_across(
     query: &[impl AsRef<str> + Sync],
@@ -831,31 +1212,17 @@ pub fn get_neighbors_across(
     check_strings_ascii(reference, InputType::Reference)?;
 
     let (convergent_indices, group_sizes) = {
-        let num_del_variants_q = get_num_del_vars_per_string(query, max_distance);
-        let num_del_variants_r = get_num_del_vars_per_string(reference, max_distance);
+        let num_del_variants_q = get_num_del_vars_per_string_up_to(query, max_distance);
+        let num_del_variants_r = get_num_del_vars_per_string_up_to(reference, max_distance);
 
         let total_capacity =
             num_del_variants_q.iter().sum::<usize>() + num_del_variants_r.iter().sum::<usize>();
         let mut variant_index_pairs_uninit = prealloc_maybeuninit_vec(total_capacity);
-
-        let mut vip_chunks_q = Vec::with_capacity(query.len());
-        let mut remaining = &mut variant_index_pairs_uninit[..];
-        for n in num_del_variants_q {
-            let (chunk, rest) = remaining.split_at_mut(n);
-            vip_chunks_q.push(chunk);
-            remaining = rest;
-        }
-
-        let mut vip_chunks_r = Vec::with_capacity(reference.len());
-        for n in num_del_variants_r {
-            let (chunk, rest) = remaining.split_at_mut(n);
-            vip_chunks_r.push(chunk);
-            remaining = rest;
-        }
-
-        debug_assert_eq!(remaining.len(), 0);
-        debug_assert_eq!(vip_chunks_q.len(), query.len());
-        debug_assert_eq!(vip_chunks_r.len(), reference.len());
+        let (vip_chunks_q, vip_chunks_r) = get_disjoint_chunks_mut_cross(
+            &num_del_variants_q,
+            &num_del_variants_r,
+            &mut variant_index_pairs_uninit[..],
+        );
 
         let hash_builder = FixedState::default();
 
@@ -890,70 +1257,188 @@ pub fn get_neighbors_across(
                 );
             });
 
-        let mut variant_index_pairs =
-            unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
-
-        variant_index_pairs.par_sort_unstable();
-        variant_index_pairs.dedup();
-
-        let mut total_num_convergent_indices = 0;
-        let mut num_convergence_groups = 0;
-
-        variant_index_pairs
-            .chunk_by(|(v1, _), (v2, _)| v1 == v2)
-            .filter(|chunk| chunk.len() > 1)
-            .for_each(|chunk| {
-                total_num_convergent_indices += chunk.len();
-                num_convergence_groups += 1;
-            });
-
-        let mut convergent_indices = Vec::with_capacity(total_num_convergent_indices);
-        let mut convergence_group_sizes = Vec::with_capacity(num_convergence_groups);
-
-        variant_index_pairs
-            .chunk_by(|(v1, _), (v2, _)| v1 == v2)
-            .filter(|chunk| chunk.len() > 1)
-            .map(|chunk| {
-                let len_q = chunk.iter().filter(|(_, ci)| !ci.is_ref()).count();
-                let len_r = chunk.iter().filter(|(_, ci)| ci.is_ref()).count();
-                (chunk, len_q, len_r)
-            })
-            .filter(|(_, len_q, len_r)| len_q * len_r > 0)
-            .for_each(|(chunk, len_q, len_r)| {
-                convergent_indices.extend(
-                    chunk
-                        .iter()
-                        .filter(|(_, ci)| !ci.is_ref())
-                        .map(|&(_, ci)| ci.get_value()),
-                );
-                convergent_indices.extend(
-                    chunk
-                        .iter()
-                        .filter(|(_, ci)| ci.is_ref())
-                        .map(|&(_, ci)| ci.get_value()),
-                );
-
-                convergence_group_sizes.push((len_q, len_r));
-            });
-
-        (convergent_indices, convergence_group_sizes)
+        let variant_index_pairs = unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
+        collect_convergent_indices_cross(variant_index_pairs)
     };
 
-    let mut convergent_chunks = Vec::with_capacity(group_sizes.len());
-    let mut remaining = &convergent_indices[..];
-    for (n_q, n_r) in group_sizes {
-        let (chunk_q, rest) = remaining.split_at(n_q);
-        let (chunk_r, rest) = rest.split_at(n_r);
-        convergent_chunks.push((chunk_q, chunk_r));
-        remaining = rest;
-    }
-
-    debug_assert_eq!(remaining.len(), 0);
-
+    let convergent_chunks = get_convergent_chunks_cross(&group_sizes, &convergent_indices[..]);
     let candidates = get_hit_candidates_across(&convergent_chunks);
-    let dists = compute_dists(&candidates, query, reference, max_distance);
+    let dists = compute_dists_levenshtein(&candidates, query, reference, max_distance);
 
-    Ok(collect_true_hits(&candidates, &dists, max_distance))
+    Ok(validate_and_collect_hits(candidates, dists, max_distance))
+}
+
+/// A version of [`get_neighbors_within`] which uses Hamming distance instead of Levenshtein
+/// distance.
+///
+/// # Examples
+///
+/// ```
+/// use symscan::{get_hamming_neighbors_within, NeighborPairs};
+///
+/// let query = ["fizz", "fuzz", "buzz", "fizzy"];
+/// let NeighborPairs { row, col, dists } = get_hamming_neighbors_within(&query, 1).unwrap();
+///
+/// assert_eq!(row,   vec![0, 1]);
+/// assert_eq!(col,   vec![1, 2]);
+/// assert_eq!(dists, vec![1, 1]);
+///
+/// let NeighborPairs { row, col, dists } = get_hamming_neighbors_within(&query, 2).unwrap();
+///
+/// assert_eq!(row,   vec![0, 0, 1]);
+/// assert_eq!(col,   vec![1, 2, 2]);
+/// assert_eq!(dists, vec![1, 2, 1]);
+/// ```
+pub fn get_hamming_neighbors_within(
+    query: &[impl AsRef<str> + Sync],
+    max_distance: u8,
+) -> Result<NeighborPairs, Error> {
+    if query.len() > u32::MAX as usize {
+        return Err(Error::TooManyStrings {
+            input_type: InputType::Query,
+            got: query.len(),
+            limit: u32::MAX as usize,
+        });
+    }
+    let max_distance = MaxDistance::try_from(max_distance)?;
+    check_strings_ascii(query, InputType::Query)?;
+
+    let (convergent_indices, group_sizes) = {
+        let num_vars_per_string = get_num_del_vars_per_string_at(query, max_distance);
+
+        let mut variant_index_pairs_uninit =
+            prealloc_maybeuninit_vec(num_vars_per_string.iter().sum());
+        let vip_chunks =
+            get_disjoint_chunks_mut(&num_vars_per_string, &mut variant_index_pairs_uninit[..]);
+
+        let hash_builder = FixedState::default();
+
+        query
+            .par_iter()
+            .zip(vip_chunks.into_par_iter())
+            .enumerate()
+            .with_min_len(100000)
+            .for_each(|(idx, (s, chunk))| {
+                write_vi_pairs_rawidx_hamming(
+                    s.as_ref(),
+                    idx as u32,
+                    max_distance,
+                    chunk,
+                    &hash_builder,
+                );
+            });
+
+        let variant_index_pairs = unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
+        collect_convergent_indices(variant_index_pairs)
+    };
+
+    let convergent_chunks = get_convergent_chunks(&group_sizes, &convergent_indices[..]);
+    let candidates = get_hit_candidates_within(&convergent_chunks);
+    let dists = compute_dists_hamming(&candidates, query, query, max_distance);
+
+    Ok(validate_and_collect_hits(candidates, dists, max_distance))
+}
+
+/// A version of [`get_neighbors_across`] which uses Hamming distance instead of Levenshtein
+/// distance.
+///
+/// # Examples
+///
+/// ```
+/// use symscan::{get_hamming_neighbors_across, NeighborPairs};
+///
+/// let query = ["fizz", "fuzz", "buzz", "fizzy"];
+/// let reference = ["foo", "bar", "baz", "buzz"];
+/// let NeighborPairs { row, col, dists } = get_hamming_neighbors_across(&query, &reference, 1).unwrap();
+///
+/// assert_eq!(row,   vec![1, 2]);
+/// assert_eq!(col,   vec![3, 3]);
+/// assert_eq!(dists, vec![1, 0]);
+///
+/// let NeighborPairs { row, col, dists } = get_hamming_neighbors_across(&query, &reference, 2).unwrap();
+///
+/// assert_eq!(row,   vec![0, 1, 2]);
+/// assert_eq!(col,   vec![3, 3, 3]);
+/// assert_eq!(dists, vec![2, 1, 0]);
+/// ```
+pub fn get_hamming_neighbors_across(
+    query: &[impl AsRef<str> + Sync],
+    reference: &[impl AsRef<str> + Sync],
+    max_distance: u8,
+) -> Result<NeighborPairs, Error> {
+    if query.len() > CrossIndex::MAX {
+        return Err(Error::TooManyStrings {
+            input_type: InputType::Query,
+            got: query.len(),
+            limit: CrossIndex::MAX,
+        });
+    }
+    if reference.len() > CrossIndex::MAX {
+        return Err(Error::TooManyStrings {
+            input_type: InputType::Reference,
+            got: reference.len(),
+            limit: CrossIndex::MAX,
+        });
+    }
+    let max_distance = MaxDistance::try_from(max_distance)?;
+    check_strings_ascii(query, InputType::Query)?;
+    check_strings_ascii(reference, InputType::Reference)?;
+
+    let (convergent_indices, group_sizes) = {
+        let num_del_variants_q = get_num_del_vars_per_string_at(query, max_distance);
+        let num_del_variants_r = get_num_del_vars_per_string_at(reference, max_distance);
+
+        let total_capacity =
+            num_del_variants_q.iter().sum::<usize>() + num_del_variants_r.iter().sum::<usize>();
+        let mut variant_index_pairs_uninit = prealloc_maybeuninit_vec(total_capacity);
+        let (vip_chunks_q, vip_chunks_r) = get_disjoint_chunks_mut_cross(
+            &num_del_variants_q,
+            &num_del_variants_r,
+            &mut variant_index_pairs_uninit[..],
+        );
+
+        let hash_builder = FixedState::default();
+
+        query
+            .par_iter()
+            .zip(vip_chunks_q.into_par_iter())
+            .enumerate()
+            .with_min_len(100000)
+            .for_each(|(idx, (s, chunk))| {
+                write_vi_pairs_ci_hamming(
+                    s.as_ref(),
+                    idx as u32,
+                    max_distance,
+                    false,
+                    chunk,
+                    &hash_builder,
+                );
+            });
+        reference
+            .par_iter()
+            .zip(vip_chunks_r.into_par_iter())
+            .enumerate()
+            .with_min_len(100000)
+            .for_each(|(idx, (s, chunk))| {
+                write_vi_pairs_ci_hamming(
+                    s.as_ref(),
+                    idx as u32,
+                    max_distance,
+                    true,
+                    chunk,
+                    &hash_builder,
+                );
+            });
+
+        let variant_index_pairs = unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
+        collect_convergent_indices_cross(variant_index_pairs)
+    };
+
+    let convergent_chunks = get_convergent_chunks_cross(&group_sizes, &convergent_indices[..]);
+    let candidates = get_hit_candidates_across(&convergent_chunks);
+    let dists = compute_dists_hamming(&candidates, query, reference, max_distance);
+
+    Ok(validate_and_collect_hits(candidates, dists, max_distance))
 }
 
 fn check_strings_ascii(strings: &[impl AsRef<str>], input_type: InputType) -> Result<(), Error> {
@@ -969,7 +1454,8 @@ fn check_strings_ascii(strings: &[impl AsRef<str>], input_type: InputType) -> Re
     Ok(())
 }
 
-fn get_num_del_vars_per_string(
+/// Compute the total number of deletion variants up to a certain number of maximum deletions.
+fn get_num_del_vars_per_string_up_to(
     strings: &[impl AsRef<str>],
     max_distance: MaxDistance,
 ) -> Vec<usize> {
@@ -984,6 +1470,24 @@ fn get_num_del_vars_per_string(
                 num_vars += get_num_k_combs(s.as_ref().len(), k);
             }
             num_vars
+        })
+        .collect_vec()
+}
+
+/// Compute the total number of deletion variants per input string at exactly some number of
+/// deletions.
+fn get_num_del_vars_per_string_at(
+    strings: &[impl AsRef<str>],
+    max_distance: MaxDistance,
+) -> Vec<usize> {
+    strings
+        .iter()
+        .map(|s| {
+            if max_distance.as_usize() >= s.as_ref().len() {
+                1
+            } else {
+                get_num_k_combs(s.as_ref().len(), max_distance.as_u8())
+            }
         })
         .collect_vec()
 }
@@ -1039,7 +1543,7 @@ fn write_vi_pairs_rawidx(
     }
 }
 
-/// Similar to write_deletion_variants_rawidx but with the indices wrapped in CrossIndex.
+/// Similar to write_vi_pairs_rawidx but with the indices wrapped in CrossIndex.
 fn write_vi_pairs_ci(
     input: &str,
     input_idx: u32,
@@ -1081,6 +1585,124 @@ fn write_vi_pairs_ci(
     }
 }
 
+/// Equivalent to write_vi_pairs_rawidx but for Hamming, where we only generate deletions of exactly
+/// max_deletions characters.
+fn write_vi_pairs_rawidx_hamming(
+    input: &str,
+    input_idx: u32,
+    max_deletions: MaxDistance,
+    chunk: &mut [MaybeUninit<(u64, u32)>],
+    hash_builder: &impl BuildHasher,
+) {
+    const NULL_CHARACTER: u8 = u8::MAX;
+    let input_length = input.len();
+    let mut variant_buffer = Vec::with_capacity(input_length);
+
+    if max_deletions.as_usize() >= input_length {
+        variant_buffer.fill(NULL_CHARACTER);
+        chunk[0].write((hash_string(variant_buffer, hash_builder), input_idx));
+        return;
+    }
+
+    for (variant_idx, deletion_indices) in (0..input_length)
+        .combinations(max_deletions.as_usize())
+        .enumerate()
+    {
+        variant_buffer.clear();
+        let mut cursor = 0;
+
+        for idx in deletion_indices {
+            variant_buffer.extend_from_slice(&input.as_bytes()[cursor..idx]);
+            variant_buffer.push(NULL_CHARACTER);
+            cursor = idx + 1;
+        }
+        variant_buffer.extend_from_slice(&input.as_bytes()[cursor..input_length]);
+
+        chunk[variant_idx].write((hash_string(&variant_buffer, hash_builder), input_idx));
+    }
+}
+
+/// Equivalent to write_vi_pairs_ci but for Hamming distance instead of Levenshtein.
+fn write_vi_pairs_ci_hamming(
+    input: &str,
+    input_idx: u32,
+    max_deletions: MaxDistance,
+    is_ref: bool,
+    chunk: &mut [MaybeUninit<(u64, CrossIndex)>],
+    hash_builder: &impl BuildHasher,
+) {
+    const NULL_CHARACTER: u8 = u8::MAX;
+    let input_length = input.len();
+    let mut variant_buffer = Vec::with_capacity(input_length);
+
+    if max_deletions.as_usize() >= input_length {
+        variant_buffer.fill(NULL_CHARACTER);
+        chunk[0].write((
+            hash_string(variant_buffer, hash_builder),
+            CrossIndex::from(input_idx, is_ref),
+        ));
+        return;
+    }
+
+    for (variant_idx, deletion_indices) in (0..input_length)
+        .combinations(max_deletions.as_usize())
+        .enumerate()
+    {
+        variant_buffer.clear();
+        let mut cursor = 0;
+
+        for idx in deletion_indices {
+            variant_buffer.extend_from_slice(&input.as_bytes()[cursor..idx]);
+            variant_buffer.push(NULL_CHARACTER);
+            cursor = idx + 1;
+        }
+        variant_buffer.extend_from_slice(&input.as_bytes()[cursor..input_length]);
+
+        chunk[variant_idx].write((
+            hash_string(&variant_buffer, hash_builder),
+            CrossIndex::from(input_idx, is_ref),
+        ));
+    }
+}
+
+/// Similar to write_vi_pairs_rawidx_hamming but for CachedRefHamming, where we store deletion
+/// variants up to max_deletions deletions instead of only exactly max_deletions deletions.
+fn write_vi_pairs_cached_hamming(
+    input: &str,
+    input_idx: u32,
+    max_deletions: MaxDistance,
+    chunk: &mut [MaybeUninit<(u64, u32)>],
+    hash_builder: &impl BuildHasher,
+) {
+    const NULL_CHARACTER: u8 = u8::MAX;
+    let input_length = input.len();
+
+    chunk[0].write((hash_string(input, hash_builder), input_idx));
+
+    let mut variant_idx = 1;
+    let mut variant_buffer = Vec::with_capacity(input_length);
+    for num_deletions in 1..=max_deletions.as_u8() {
+        if num_deletions as usize > input_length {
+            break;
+        }
+
+        for deletion_indices in (0..input_length).combinations(num_deletions as usize) {
+            variant_buffer.clear();
+            let mut cursor = 0;
+
+            for idx in deletion_indices {
+                variant_buffer.extend_from_slice(&input.as_bytes()[cursor..idx]);
+                variant_buffer.push(NULL_CHARACTER);
+                cursor = idx + 1;
+            }
+            variant_buffer.extend_from_slice(&input.as_bytes()[cursor..input_length]);
+
+            chunk[variant_idx].write((hash_string(&variant_buffer, hash_builder), input_idx));
+            variant_idx += 1;
+        }
+    }
+}
+
 fn hash_string(s: impl AsRef<[u8]>, hash_builder: &impl BuildHasher) -> u64 {
     let mut hasher = hash_builder.build_hasher();
     hasher.write(s.as_ref());
@@ -1091,6 +1713,14 @@ fn prealloc_maybeuninit_vec<T>(total_capacity: usize) -> Vec<MaybeUninit<T>> {
     let mut v: Vec<MaybeUninit<T>> = Vec::with_capacity(total_capacity);
     unsafe { v.set_len(total_capacity) };
     v
+}
+
+unsafe fn cast_to_initialised_vec<T>(mut input: Vec<MaybeUninit<T>>) -> Vec<T> {
+    let ptr = input.as_mut_ptr() as *mut T;
+    let len = input.len();
+    let cap = input.capacity();
+    std::mem::forget(input);
+    Vec::from_raw_parts(ptr, len, cap)
 }
 
 fn get_disjoint_spans(span_lens: &[usize]) -> Vec<Span> {
@@ -1119,12 +1749,147 @@ fn get_disjoint_chunks_mut<'a, T>(
     chunks
 }
 
-unsafe fn cast_to_initialised_vec<T>(mut input: Vec<MaybeUninit<T>>) -> Vec<T> {
-    let ptr = input.as_mut_ptr() as *mut T;
-    let len = input.len();
-    let cap = input.capacity();
-    std::mem::forget(input);
-    Vec::from_raw_parts(ptr, len, cap)
+/// Similar to get_disjoint_chunks_mut but for cross-set queries. Takes two chunk length slices and
+/// generates two chunk vectors.
+fn get_disjoint_chunks_mut_cross<'a, T>(
+    chunk_lens_a: &[usize],
+    chunk_lens_b: &[usize],
+    mut backing_memory: &'a mut [T],
+) -> (Vec<&'a mut [T]>, Vec<&'a mut [T]>) {
+    let mut chunks_a = Vec::with_capacity(chunk_lens_a.len());
+    for &n in chunk_lens_a {
+        let (chunk, rest) = backing_memory.split_at_mut(n);
+        chunks_a.push(chunk);
+        backing_memory = rest;
+    }
+
+    let mut chunks_b = Vec::with_capacity(chunk_lens_b.len());
+    for &n in chunk_lens_b {
+        let (chunk, rest) = backing_memory.split_at_mut(n);
+        chunks_b.push(chunk);
+        backing_memory = rest;
+    }
+
+    debug_assert_eq!(backing_memory.len(), 0);
+
+    (chunks_a, chunks_b)
+}
+
+fn collect_convergent_indices(mut variant_index_pairs: Vec<(u64, u32)>) -> (Vec<u32>, Vec<usize>) {
+    variant_index_pairs.par_sort_unstable();
+    variant_index_pairs.dedup();
+
+    let mut total_num_convergent_indices = 0;
+    let mut num_convergence_groups = 0;
+
+    variant_index_pairs
+        .chunk_by(|(v1, _), (v2, _)| v1 == v2)
+        .filter(|chunk| chunk.len() > 1)
+        .for_each(|chunk| {
+            total_num_convergent_indices += chunk.len();
+            num_convergence_groups += 1;
+        });
+
+    let mut convergent_indices = Vec::with_capacity(total_num_convergent_indices);
+    let mut convergence_group_sizes = Vec::with_capacity(num_convergence_groups);
+
+    variant_index_pairs
+        .chunk_by(|(v1, _), (v2, _)| v1 == v2)
+        .filter(|chunk| chunk.len() > 1)
+        .for_each(|chunk| {
+            convergent_indices.extend(chunk.iter().map(|&(_, i)| i));
+            convergence_group_sizes.push(chunk.len());
+        });
+
+    (convergent_indices, convergence_group_sizes)
+}
+
+fn collect_convergent_indices_cross(
+    mut variant_index_pairs: Vec<(u64, CrossIndex)>,
+) -> (Vec<u32>, Vec<(usize, usize)>) {
+    variant_index_pairs.par_sort_unstable();
+    variant_index_pairs.dedup();
+
+    let mut total_num_convergent_indices = 0;
+    let mut num_convergence_groups = 0;
+
+    variant_index_pairs
+        .chunk_by(|(v1, _), (v2, _)| v1 == v2)
+        .filter(|chunk| chunk.len() > 1)
+        .for_each(|chunk| {
+            total_num_convergent_indices += chunk.len();
+            num_convergence_groups += 1;
+        });
+
+    let mut convergent_indices = Vec::with_capacity(total_num_convergent_indices);
+    let mut convergence_group_sizes = Vec::with_capacity(num_convergence_groups);
+
+    variant_index_pairs
+        .chunk_by(|(v1, _), (v2, _)| v1 == v2)
+        .filter(|chunk| chunk.len() > 1)
+        .map(|chunk| {
+            let len_q = chunk.iter().filter(|(_, ci)| !ci.is_ref()).count();
+            let len_r = chunk.iter().filter(|(_, ci)| ci.is_ref()).count();
+            (chunk, len_q, len_r)
+        })
+        .filter(|(_, len_q, len_r)| len_q * len_r > 0)
+        .for_each(|(chunk, len_q, len_r)| {
+            convergent_indices.extend(
+                chunk
+                    .iter()
+                    .filter(|(_, ci)| !ci.is_ref())
+                    .map(|&(_, ci)| ci.get_value()),
+            );
+            convergent_indices.extend(
+                chunk
+                    .iter()
+                    .filter(|(_, ci)| ci.is_ref())
+                    .map(|&(_, ci)| ci.get_value()),
+            );
+
+            convergence_group_sizes.push((len_q, len_r));
+        });
+
+    (convergent_indices, convergence_group_sizes)
+}
+
+/// Given a contiguous slice of indices and a slice of sizes that demarcate chunks of indices that
+/// converge to the same deletion variant, return a vector of slices where each slice groups
+/// together indices of strings that converge to the same deletion variant.
+fn get_convergent_chunks<'a, T>(
+    conv_group_sizes: &[usize],
+    mut convergent_indices: &'a [T],
+) -> Vec<&'a [T]> {
+    let mut conv_chunks = Vec::with_capacity(conv_group_sizes.len());
+    for &n in conv_group_sizes {
+        let (chunk, rest) = convergent_indices.split_at(n);
+        conv_chunks.push(chunk);
+        convergent_indices = rest;
+    }
+
+    debug_assert_eq!(convergent_indices.len(), 0);
+
+    conv_chunks
+}
+
+/// Similar to get_convergent_chunks but for cross-set queries, where the elements in the output
+/// vector are two-tuples of slices, the first slice of the convergent indices from the query set,
+/// and the second slice of convergent indices from the reference set.
+fn get_convergent_chunks_cross<'a, T>(
+    conv_group_sizes: &[(usize, usize)],
+    mut convergent_indices: &'a [T],
+) -> Vec<(&'a [T], &'a [T])> {
+    let mut conv_chunks = Vec::with_capacity(conv_group_sizes.len());
+    for &(n_q, n_r) in conv_group_sizes {
+        let (chunk_q, rest) = convergent_indices.split_at(n_q);
+        let (chunk_r, rest) = rest.split_at(n_r);
+        conv_chunks.push((chunk_q, chunk_r));
+        convergent_indices = rest;
+    }
+
+    debug_assert_eq!(convergent_indices.len(), 0);
+
+    conv_chunks
 }
 
 fn get_hit_candidates_within(convergent_indices: &[impl AsRef<[u32]> + Sync]) -> Vec<(u32, u32)> {
@@ -1199,7 +1964,7 @@ where
     hit_candidates
 }
 
-fn compute_dists(
+fn compute_dists_levenshtein(
     hit_candidates: &[(u32, u32)],
     query: &[impl AsRef<str> + Sync],
     reference: &[impl AsRef<str> + Sync],
@@ -1209,33 +1974,59 @@ fn compute_dists(
         .par_iter()
         .with_min_len(100000)
         .map(|&(idx_query, idx_reference)| {
-            let dist = {
-                match levenshtein::distance_with_args(
-                    query[idx_query as usize].as_ref().bytes(),
-                    reference[idx_reference as usize].as_ref().bytes(),
-                    &levenshtein::Args::default().score_cutoff(max_distance.as_usize()),
-                ) {
-                    None => u8::MAX,
-                    Some(dist) => dist as u8,
-                }
-            };
-
-            dist
+            match levenshtein::distance_with_args(
+                query[idx_query as usize].as_ref().bytes(),
+                reference[idx_reference as usize].as_ref().bytes(),
+                &levenshtein::Args::default().score_cutoff(max_distance.as_usize()),
+            ) {
+                None => u8::MAX,
+                Some(dist) => dist as u8,
+            }
         })
         .collect()
 }
 
-/// Examine and double check hits to see if they are real
-fn collect_true_hits(
+fn compute_dists_hamming(
     hit_candidates: &[(u32, u32)],
-    dists: &[u8],
+    query: &[impl AsRef<str> + Sync],
+    reference: &[impl AsRef<str> + Sync],
+    max_distance: MaxDistance,
+) -> Vec<u8> {
+    hit_candidates
+        .par_iter()
+        .with_min_len(100000)
+        .map(|&(idx_query, idx_reference)| {
+            debug_assert!(
+                query[idx_query as usize].as_ref().len()
+                    == reference[idx_reference as usize].as_ref().len()
+            );
+
+            match unsafe {
+                hamming::distance_with_args(
+                    query[idx_query as usize].as_ref().bytes(),
+                    reference[idx_reference as usize].as_ref().bytes(),
+                    &hamming::Args::default().score_cutoff(max_distance.as_usize()),
+                )
+                .unwrap_unchecked()
+            } {
+                None => u8::MAX,
+                Some(dist) => dist as u8,
+            }
+        })
+        .collect()
+}
+
+/// Examine and double check hits to see if they are real, then collect into a tuple of vectors.
+fn validate_and_collect_hits(
+    hit_candidates: Vec<(u32, u32)>,
+    dists: Vec<u8>,
     max_distance: MaxDistance,
 ) -> NeighborPairs {
     let mut qi_filtered = Vec::with_capacity(dists.len());
     let mut ri_filtered = Vec::with_capacity(dists.len());
     let mut dists_filtered = Vec::with_capacity(dists.len());
 
-    for (&(qi, ri), &d) in hit_candidates.iter().zip(dists.iter()) {
+    for ((qi, ri), d) in hit_candidates.into_iter().zip(dists) {
         if d > max_distance.as_u8() {
             continue;
         }
@@ -1275,7 +2066,7 @@ mod tests {
     fn test_get_num_del_vars_per_string() {
         let strings = ["foo".to_string(), "bar".to_string(), "baz".to_string()];
         let result =
-            get_num_del_vars_per_string(&strings, MaxDistance::try_from(1).expect("legal"));
+            get_num_del_vars_per_string_up_to(&strings, MaxDistance::try_from(1).expect("legal"));
         assert_eq!(result, vec![4, 4, 4]);
     }
 
@@ -1316,7 +2107,7 @@ mod tests {
         ];
 
         for (candidates, reference, mdist, expected) in cases {
-            let results = compute_dists(&candidates, &TEST_QUERY, reference, mdist);
+            let results = compute_dists_levenshtein(&candidates, &TEST_QUERY, reference, mdist);
             assert_eq!(results, expected);
         }
     }
@@ -1347,145 +2138,7 @@ mod tests {
         ];
 
         for (candidates, dists, mdist, expected) in cases {
-            let result = collect_true_hits(&candidates, &dists, mdist);
-            assert_eq!(result, expected);
-        }
-    }
-
-    #[test]
-    fn test_symdel_within() {
-        let cases = [
-            (
-                1,
-                NeighborPairs {
-                    row: vec![0, 1],
-                    col: vec![1, 2],
-                    dists: vec![1, 1],
-                },
-            ),
-            (
-                2,
-                NeighborPairs {
-                    row: vec![0, 0, 0, 1],
-                    col: vec![1, 2, 3, 2],
-                    dists: vec![1, 2, 2, 1],
-                },
-            ),
-        ];
-        for (mdist, expected) in cases {
-            let result = get_neighbors_within(&TEST_QUERY, mdist).expect("short input");
-            assert_eq!(result, expected);
-        }
-    }
-
-    #[test]
-    fn test_symdel_within_cached() {
-        let cached = CachedRef::new(&TEST_QUERY, 2).expect("short input");
-        let cases = [
-            (
-                1,
-                NeighborPairs {
-                    row: vec![0, 1],
-                    col: vec![1, 2],
-                    dists: vec![1, 1],
-                },
-            ),
-            (
-                2,
-                NeighborPairs {
-                    row: vec![0, 0, 0, 1],
-                    col: vec![1, 2, 3, 2],
-                    dists: vec![1, 2, 2, 1],
-                },
-            ),
-        ];
-        for (mdist, expected) in cases {
-            let result = cached.get_neighbors_within(mdist).expect("legal max dist");
-            assert_eq!(result, expected);
-        }
-    }
-
-    #[test]
-    fn test_symdel_cross() {
-        let cases = [
-            (
-                1,
-                NeighborPairs {
-                    row: vec![0, 1],
-                    col: vec![2, 2],
-                    dists: vec![0, 1],
-                },
-            ),
-            (
-                2,
-                NeighborPairs {
-                    row: vec![0, 0, 1, 2, 3, 4],
-                    col: vec![0, 2, 2, 2, 2, 1],
-                    dists: vec![2, 0, 1, 2, 2, 2],
-                },
-            ),
-        ];
-        for (mdist, expected) in cases {
-            let result = get_neighbors_across(&TEST_QUERY, &TEST_REF, mdist).expect("valid input");
-            assert_eq!(result, expected);
-        }
-    }
-
-    #[test]
-    fn test_get_candidates_cross_partially_cached() {
-        let cached = CachedRef::new(&TEST_REF, 2).expect("short input");
-        let cases = [
-            (
-                1,
-                NeighborPairs {
-                    row: vec![0, 1],
-                    col: vec![2, 2],
-                    dists: vec![0, 1],
-                },
-            ),
-            (
-                2,
-                NeighborPairs {
-                    row: vec![0, 0, 1, 2, 3, 4],
-                    col: vec![0, 2, 2, 2, 2, 1],
-                    dists: vec![2, 0, 1, 2, 2, 2],
-                },
-            ),
-        ];
-        for (mdist, expected) in cases {
-            let result = cached
-                .get_neighbors_across(&TEST_QUERY, mdist)
-                .expect("legal max dist");
-            assert_eq!(result, expected);
-        }
-    }
-
-    #[test]
-    fn test_get_candidates_cross_fully_cached() {
-        let cached_q = CachedRef::new(&TEST_QUERY, 2).expect("short input");
-        let cached_r = CachedRef::new(&TEST_REF, 2).expect("short input");
-        let cases = [
-            (
-                1,
-                NeighborPairs {
-                    row: vec![0, 1],
-                    col: vec![2, 2],
-                    dists: vec![0, 1],
-                },
-            ),
-            (
-                2,
-                NeighborPairs {
-                    row: vec![0, 0, 1, 2, 3, 4],
-                    col: vec![0, 2, 2, 2, 2, 1],
-                    dists: vec![2, 0, 1, 2, 2, 2],
-                },
-            ),
-        ];
-        for (mdist, expected) in cases {
-            let result = cached_r
-                .get_neighbors_across_cached(&cached_q, mdist)
-                .expect("legal max dist");
+            let result = validate_and_collect_hits(candidates, dists, mdist);
             assert_eq!(result, expected);
         }
     }
@@ -1499,6 +2152,14 @@ mod tests {
     static EXPECTED_BYTES_CROSS_1: &[u8] = include_bytes!("../../test_files/results_10k_cross.txt");
     static EXPECTED_BYTES_CROSS_2: &[u8] =
         include_bytes!("../../test_files/results_10k_cross_d2.txt");
+    static EXPECTED_BYTES_HAMMING_WITHIN_1: &[u8] =
+        include_bytes!("../../test_files/results_10k_a_hamming.txt");
+    static EXPECTED_BYTES_HAMMING_WITHIN_2: &[u8] =
+        include_bytes!("../../test_files/results_10k_a_hamming_d2.txt");
+    static EXPECTED_BYTES_HAMMING_CROSS_1: &[u8] =
+        include_bytes!("../../test_files/results_10k_cross_hamming.txt");
+    static EXPECTED_BYTES_HAMMING_CROSS_2: &[u8] =
+        include_bytes!("../../test_files/results_10k_cross_hamming_d2.txt");
 
     fn bytes_as_ascii_lines(bytes: &[u8]) -> Vec<String> {
         Cursor::new(bytes)
@@ -1565,6 +2226,41 @@ mod tests {
     }
 
     #[test]
+    fn test_hamming_within() {
+        let query = bytes_as_ascii_lines(CDR3_Q_BYTES);
+
+        let hits = get_hamming_neighbors_within(&query, 1).expect("short input");
+        assert_eq!(
+            hits,
+            bytes_as_neighbour_pairs(EXPECTED_BYTES_HAMMING_WITHIN_1)
+        );
+
+        let hits = get_hamming_neighbors_within(&query, 2).expect("short input");
+        assert_eq!(
+            hits,
+            bytes_as_neighbour_pairs(EXPECTED_BYTES_HAMMING_WITHIN_2)
+        );
+    }
+
+    #[test]
+    fn test_hamming_cross() {
+        let query = bytes_as_ascii_lines(CDR3_Q_BYTES);
+        let reference = bytes_as_ascii_lines(CDR3_R_BYTES);
+
+        let hits = get_hamming_neighbors_across(&query, &reference, 1).expect("valid inputs");
+        assert_eq!(
+            hits,
+            bytes_as_neighbour_pairs(EXPECTED_BYTES_HAMMING_CROSS_1)
+        );
+
+        let hits = get_hamming_neighbors_across(&query, &reference, 2).expect("valid inputs");
+        assert_eq!(
+            hits,
+            bytes_as_neighbour_pairs(EXPECTED_BYTES_HAMMING_CROSS_2)
+        );
+    }
+
+    #[test]
     fn test_within_cached() {
         let query = bytes_as_ascii_lines(CDR3_Q_BYTES);
         let cached = CachedRef::new(&query, 2).expect("short input");
@@ -1574,6 +2270,28 @@ mod tests {
 
         let hits = cached.get_neighbors_within(2).expect("legal max distance");
         assert_eq!(hits, bytes_as_neighbour_pairs(EXPECTED_BYTES_WITHIN_2));
+    }
+
+    #[test]
+    fn test_hamming_within_cached() {
+        let query = bytes_as_ascii_lines(CDR3_Q_BYTES);
+        let cached_hamming = CachedRefHamming::new(&query, 2).expect("short input");
+
+        let hits = cached_hamming
+            .get_neighbors_within(1)
+            .expect("legal max distance");
+        assert_eq!(
+            hits,
+            bytes_as_neighbour_pairs(EXPECTED_BYTES_HAMMING_WITHIN_1)
+        );
+
+        let hits = cached_hamming
+            .get_neighbors_within(2)
+            .expect("legal max distance");
+        assert_eq!(
+            hits,
+            bytes_as_neighbour_pairs(EXPECTED_BYTES_HAMMING_WITHIN_2)
+        );
     }
 
     #[test]
@@ -1609,5 +2327,52 @@ mod tests {
             .get_neighbors_across_cached(&cached_query, 2)
             .expect("legal max distance");
         assert_eq!(hits, bytes_as_neighbour_pairs(EXPECTED_BYTES_CROSS_2));
+    }
+
+    #[test]
+    fn test_hamming_cross_partially_cached() {
+        let query = bytes_as_ascii_lines(CDR3_Q_BYTES);
+        let reference = bytes_as_ascii_lines(CDR3_R_BYTES);
+        let cached_hamming = CachedRefHamming::new(&reference, 2).expect("short input");
+
+        let hits = cached_hamming
+            .get_neighbors_across(&query, 1)
+            .expect("legal max distance");
+        assert_eq!(
+            hits,
+            bytes_as_neighbour_pairs(EXPECTED_BYTES_HAMMING_CROSS_1)
+        );
+
+        let hits = cached_hamming
+            .get_neighbors_across(&query, 2)
+            .expect("legal max distance");
+        assert_eq!(
+            hits,
+            bytes_as_neighbour_pairs(EXPECTED_BYTES_HAMMING_CROSS_2)
+        );
+    }
+
+    #[test]
+    fn test_hamming_cross_fully_cached() {
+        let query = bytes_as_ascii_lines(CDR3_Q_BYTES);
+        let reference = bytes_as_ascii_lines(CDR3_R_BYTES);
+        let cached_query = CachedRefHamming::new(&query, 2).expect("short input");
+        let cached_reference = CachedRefHamming::new(&reference, 2).expect("short input");
+
+        let hits = cached_reference
+            .get_neighbors_across_cached(&cached_query, 1)
+            .expect("legal max distance");
+        assert_eq!(
+            hits,
+            bytes_as_neighbour_pairs(EXPECTED_BYTES_HAMMING_CROSS_1)
+        );
+
+        let hits = cached_reference
+            .get_neighbors_across_cached(&cached_query, 2)
+            .expect("legal max distance");
+        assert_eq!(
+            hits,
+            bytes_as_neighbour_pairs(EXPECTED_BYTES_HAMMING_CROSS_2)
+        );
     }
 }
