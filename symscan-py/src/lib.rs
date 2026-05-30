@@ -403,6 +403,10 @@ fn get_neighbors_within<'py>(
 /// max_distance : int, default=1
 ///     The maximum edit distance at which strings are considered neighbors.
 ///
+/// distance_type : { "levenshtein", "hamming" }, default="levenshtein"
+///     The string metric to use when measuring distance between input strings. When using Hamming
+///     distance, strings of different lengths will never be considered neighbors.
+///
 /// Returns
 /// -------
 /// row : ndarray of shape (N,), dtype=uint32
