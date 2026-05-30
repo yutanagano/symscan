@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["symscan", "symscan-py", "symscan-cli"]
-package.version = "0.8.0"
+package.version = "0.8.1"
 
 # The profile that 'dist' will build with
 [profile.dist]

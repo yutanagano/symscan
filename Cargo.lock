@@ -730,7 +730,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "symscan"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "criterion",
  "foldhash",
@@ -743,7 +743,7 @@ dependencies = [
 
 [[package]]
 name = "symscan-cli"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "clap 4.5.53",
  "rayon",
@@ -752,7 +752,7 @@ dependencies = [
 
 [[package]]
 name = "symscan-py"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "numpy",
  "pyo3",
