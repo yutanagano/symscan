@@ -1,3 +1,8 @@
+## Version 0.8.1
+
+- Fixed documentation page by adding in missing documentation for the new
+  distance_type parameter for the Python bindings
+
 ## Version 0.8.0
 
 - Implement optimised Hamming distance versions of the functions as well as a
