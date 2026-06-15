@@ -1,3 +1,14 @@
+## Version 0.8.2
+
+- Bumped dependency versions, notably of PyO3 which had a security
+  vulnerability discovered in the old version used here. This dependency has
+  now been bumped to a version with a fix of this vulnerability.
+- The settings for the cargo compiler target profile of `release` has been
+  tweaked so that the sizes of the compiled objects (both for the `symscan`
+  executable as well as the Python compiled package) have been shrunk from
+  roughly 1.5MB to 800KB. This has also come with marginal runtime performance
+  improvements.
+
 ## Version 0.8.1
 
 - Fixed documentation page by adding in missing documentation for the new
