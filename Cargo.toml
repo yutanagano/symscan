@@ -3,6 +3,12 @@ resolver = "3"
 members = ["symscan", "symscan-py", "symscan-cli"]
 package.version = "0.8.1"
 
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
