@@ -10,8 +10,11 @@
 //! input strings that share common deletion variants. This sort-and-scan approach trades off an
 //! additional factor of O(log N) (with N the total number of strings being compared) in expected
 //! time complexity for improved cache locality and effective parallelization, and ends up being
-//! much faster for the above use case. The crate provides separate implementations for [Levenshtein
-//! edit distance](https://en.wikipedia.org/wiki/Levenshtein_distance) and [Hamming
+//! much faster for the above use case. Parallelization is handled using the
+//! [rayon](https://docs.rs/rayon/latest/rayon/) crate internally.
+//!
+//! SymScan provides separate implementations for [Levenshtein edit
+//! distance](https://en.wikipedia.org/wiki/Levenshtein_distance) and [Hamming
 //! distance](https://en.wikipedia.org/wiki/Hamming_distance). See [`get_neighbors_within`] /
 //! [`get_hamming_neighbors_within`] and [`get_neighbors_across`] / [`get_hamming_neighbors_across`]
 //! for details on the API.
