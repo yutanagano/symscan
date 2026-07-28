@@ -1,5 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use std::io::{self, BufRead, Cursor};
+use std::time::Duration;
 use symscan::{
     get_hamming_neighbors_across, get_hamming_neighbors_within, get_neighbors_across,
     get_neighbors_within, CachedRef, CachedRefHamming,
@@ -13,6 +14,13 @@ fn bytes_as_ascii_lines(bytes: &[u8]) -> Vec<String> {
         .lines()
         .collect::<io::Result<Vec<String>>>()
         .expect("test files have valid lines")
+}
+
+fn configure_criterion() -> Criterion {
+    Criterion::default()
+        .warm_up_time(Duration::from_secs(3))
+        .measurement_time(Duration::from_secs(10))
+        .sample_size(40)
 }
 
 fn setup_benchmarks(c: &mut Criterion) {
@@ -90,5 +98,9 @@ fn setup_benchmarks(c: &mut Criterion) {
     });
 }
 
-criterion_group!(bench, setup_benchmarks);
+criterion_group! {
+    name = bench;
+    config = configure_criterion();
+    targets = setup_benchmarks
+}
 criterion_main!(bench);
