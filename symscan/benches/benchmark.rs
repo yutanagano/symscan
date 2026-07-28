@@ -1,4 +1,6 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Bencher, Criterion, SamplingMode};
+use rayon::ThreadPoolBuilder;
+use std::hint::black_box;
 use std::io::{self, BufRead, Cursor};
 use std::time::Duration;
 use symscan::{
@@ -23,7 +25,20 @@ fn configure_criterion() -> Criterion {
         .sample_size(40)
 }
 
+fn bench_on_pool<T: Send>(
+    pool: &rayon::ThreadPool,
+    b: &mut Bencher,
+    mut routine: impl FnMut() -> T + Send,
+) {
+    b.iter(|| pool.install(|| black_box(routine())));
+}
+
 fn setup_benchmarks(c: &mut Criterion) {
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .expect("failed to build single-thread rayon pool");
+
     let query = bytes_as_ascii_lines(QUERY_BYTES);
     let reference = bytes_as_ascii_lines(REFERENCE_BYTES);
     let cached_query = CachedRef::new(&query, 1).expect("short input");
@@ -31,71 +46,72 @@ fn setup_benchmarks(c: &mut Criterion) {
     let cached_query_hamming = CachedRefHamming::new(&query, 1).expect("short input");
     let cached_reference_hamming = CachedRefHamming::new(&reference, 1).expect("short input");
 
-    c.bench_function("get_neighbors_within", |b| {
-        b.iter(|| {
-            let _ = get_neighbors_within(&query, 1);
-        })
+    let mut group = c.benchmark_group("symscan");
+    group.sampling_mode(SamplingMode::Flat);
+
+    group.bench_function("get_neighbors_within", |b| {
+        bench_on_pool(&pool, b, || get_neighbors_within(&query, 1).unwrap());
     });
 
-    c.bench_function("get_hamming_neighbors_within", |b| {
-        b.iter(|| {
-            let _ = get_hamming_neighbors_within(&query, 1);
-        })
+    group.bench_function("get_hamming_neighbors_within", |b| {
+        bench_on_pool(&pool, b, || get_hamming_neighbors_within(&query, 1).unwrap());
     });
 
-    c.bench_function("get_neighbors_across", |b| {
-        b.iter(|| {
-            let _ = get_neighbors_across(&query, &reference, 1);
-        })
+    group.bench_function("get_neighbors_across", |b| {
+        bench_on_pool(&pool, b, || get_neighbors_across(&query, &reference, 1).unwrap());
     });
 
-    c.bench_function("get_hamming_neighbors_across", |b| {
-        b.iter(|| {
-            let _ = get_hamming_neighbors_across(&query, &reference, 1);
-        })
+    group.bench_function("get_hamming_neighbors_across", |b| {
+        bench_on_pool(&pool, b, || {
+            get_hamming_neighbors_across(&query, &reference, 1).unwrap()
+        });
     });
 
-    c.bench_function("get_neighbors_within (cached)", |b| {
-        b.iter(|| {
-            let _ = cached_reference.get_neighbors_within(1);
-        })
+    group.bench_function("get_neighbors_within (cached)", |b| {
+        bench_on_pool(&pool, b, || cached_reference.get_neighbors_within(1).unwrap());
     });
 
-    c.bench_function("get_hamming_neighbors_within (cached)", |b| {
-        b.iter(|| {
-            let _ = cached_reference_hamming.get_neighbors_within(1);
-        })
+    group.bench_function("get_hamming_neighbors_within (cached)", |b| {
+        bench_on_pool(&pool, b, || {
+            cached_reference_hamming.get_neighbors_within(1).unwrap()
+        });
     });
 
-    c.bench_function("get_neighbors_cross (partially cached)", |b| {
-        b.iter(|| {
-            let _ = cached_reference.get_neighbors_across(&query, 1);
-        })
+    group.bench_function("get_neighbors_cross (partially cached)", |b| {
+        bench_on_pool(&pool, b, || {
+            cached_reference.get_neighbors_across(&query, 1).unwrap()
+        });
     });
 
-    c.bench_function("get_neighbors_cross (fully cached)", |b| {
-        b.iter(|| {
-            let _ = cached_reference.get_neighbors_across_cached(&cached_query, 1);
-        })
+    group.bench_function("get_neighbors_cross (fully cached)", |b| {
+        bench_on_pool(&pool, b, || {
+            cached_reference
+                .get_neighbors_across_cached(&cached_query, 1)
+                .unwrap()
+        });
     });
 
-    c.bench_function("get_hamming_neighbors_cross (partially cached)", |b| {
-        b.iter(|| {
-            let _ = cached_reference_hamming.get_neighbors_across(&query, 1);
-        })
+    group.bench_function("get_hamming_neighbors_cross (partially cached)", |b| {
+        bench_on_pool(&pool, b, || {
+            cached_reference_hamming
+                .get_neighbors_across(&query, 1)
+                .unwrap()
+        });
     });
 
-    c.bench_function("get_hamming_neighbors_cross (fully cached)", |b| {
-        b.iter(|| {
-            let _ = cached_reference_hamming.get_neighbors_across_cached(&cached_query_hamming, 1);
-        })
+    group.bench_function("get_hamming_neighbors_cross (fully cached)", |b| {
+        bench_on_pool(&pool, b, || {
+            cached_reference_hamming
+                .get_neighbors_across_cached(&cached_query_hamming, 1)
+                .unwrap()
+        });
     });
 
-    c.bench_function("cached instantiation", |b| {
-        b.iter(|| {
-            let _ = CachedRef::new(&reference, 1);
-        })
+    group.bench_function("cached instantiation", |b| {
+        bench_on_pool(&pool, b, || CachedRef::new(&reference, 1).unwrap());
     });
+
+    group.finish();
 }
 
 criterion_group! {
