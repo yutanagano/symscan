@@ -158,11 +158,11 @@ struct IdentityHasher(u64);
 
 impl Hasher for IdentityHasher {
     fn write(&mut self, bytes: &[u8]) {
-        unreachable!("hasher only designed for u64, got {bytes:?}");
+        unreachable!("hasher only designed for u32, got {bytes:?}");
     }
 
-    fn write_u64(&mut self, i: u64) {
-        self.0 = i
+    fn write_u32(&mut self, i: u32) {
+        self.0 = i as u64
     }
 
     fn finish(&self) -> u64 {
@@ -291,7 +291,7 @@ pub struct CachedRef {
     str_store: Vec<u8>,
     str_spans: Vec<Span>,
     index_store: Vec<u32>,
-    variant_map: HashMap<u64, Span, IdentityHasherBuilder>,
+    variant_map: HashMap<u32, Span, IdentityHasherBuilder>,
     max_distance: MaxDistance,
 }
 
@@ -318,7 +318,6 @@ impl CachedRef {
             reference
                 .par_iter()
                 .zip(str_store_chunks.into_par_iter())
-                .with_min_len(100000)
                 .for_each(|(s, chunk)| {
                     debug_assert_eq!(s.as_ref().len(), chunk.len());
                     unsafe {
@@ -341,7 +340,7 @@ impl CachedRef {
             let num_vars_per_string = get_num_del_vars_per_string_up_to(reference, max_distance);
 
             let mut variant_index_pairs_uninit =
-                prealloc_maybeuninit_vec::<(u64, u32)>(num_vars_per_string.iter().sum());
+                prealloc_maybeuninit_vec::<(u32, u32)>(num_vars_per_string.iter().sum());
             let vip_chunks =
                 get_disjoint_chunks_mut(&num_vars_per_string, &mut variant_index_pairs_uninit[..]);
 
@@ -349,7 +348,6 @@ impl CachedRef {
                 .par_iter()
                 .zip(vip_chunks.into_par_iter())
                 .enumerate()
-                .with_min_len(100000)
                 .for_each(|(idx, (s, chunk))| {
                     write_vi_pairs_rawidx(
                         s.as_ref(),
@@ -469,7 +467,6 @@ impl CachedRef {
                 .par_iter()
                 .zip(vip_chunks.into_par_iter())
                 .enumerate()
-                .with_min_len(100000)
                 .for_each(|(idx, (s, chunk))| {
                     write_vi_pairs_rawidx(
                         s.as_ref(),
@@ -620,7 +617,6 @@ impl CachedRef {
     ) -> Vec<u8> {
         hit_candidates
             .par_iter()
-            .with_min_len(100000)
             .map(|&(idx_query, idx_reference)| {
                 let dist = {
                     match levenshtein::distance_with_args(
@@ -646,7 +642,6 @@ impl CachedRef {
     ) -> Vec<u8> {
         hit_candidates
             .par_iter()
-            .with_min_len(100000)
             .map(|&(idx_query, idx_reference)| {
                 let dist = {
                     match levenshtein::distance_with_args(
@@ -695,7 +690,7 @@ pub struct CachedRefHamming {
     str_store: Vec<u8>,
     str_spans: Vec<Span>,
     index_store: Vec<u32>,
-    variant_map: HashMap<u64, Span, IdentityHasherBuilder>,
+    variant_map: HashMap<u32, Span, IdentityHasherBuilder>,
     max_distance: MaxDistance,
 }
 
@@ -722,7 +717,6 @@ impl CachedRefHamming {
             reference
                 .par_iter()
                 .zip(str_store_chunks.into_par_iter())
-                .with_min_len(100000)
                 .for_each(|(s, chunk)| {
                     debug_assert_eq!(s.as_ref().len(), chunk.len());
                     unsafe {
@@ -745,7 +739,7 @@ impl CachedRefHamming {
             let num_vars_per_string = get_num_del_vars_per_string_up_to(reference, max_distance);
 
             let mut variant_index_pairs_uninit =
-                prealloc_maybeuninit_vec::<(u64, u32)>(num_vars_per_string.iter().sum());
+                prealloc_maybeuninit_vec::<(u32, u32)>(num_vars_per_string.iter().sum());
             let vip_chunks =
                 get_disjoint_chunks_mut(&num_vars_per_string, &mut variant_index_pairs_uninit[..]);
 
@@ -753,7 +747,6 @@ impl CachedRefHamming {
                 .par_iter()
                 .zip(vip_chunks.into_par_iter())
                 .enumerate()
-                .with_min_len(100000)
                 .for_each(|(idx, (s, chunk))| {
                     write_vi_pairs_cached_hamming(
                         s.as_ref(),
@@ -873,7 +866,6 @@ impl CachedRefHamming {
                 .par_iter()
                 .zip(vip_chunks.into_par_iter())
                 .enumerate()
-                .with_min_len(100000)
                 .for_each(|(idx, (s, chunk))| {
                     write_vi_pairs_rawidx_hamming(
                         s.as_ref(),
@@ -1024,7 +1016,6 @@ impl CachedRefHamming {
     ) -> Vec<u8> {
         hit_candidates
             .par_iter()
-            .with_min_len(100000)
             .map(|&(idx_query, idx_reference)| {
                 debug_assert_eq!(
                     query[idx_query as usize].as_ref().len(),
@@ -1054,7 +1045,6 @@ impl CachedRefHamming {
     ) -> Vec<u8> {
         hit_candidates
             .par_iter()
-            .with_min_len(100000)
             .map(|&(idx_query, idx_reference)| {
                 debug_assert_eq!(
                     query.get_str_at_index(idx_query as usize).len(),
@@ -1140,7 +1130,6 @@ pub fn get_neighbors_within(
             .par_iter()
             .zip(vip_chunks.into_par_iter())
             .enumerate()
-            .with_min_len(100000)
             .for_each(|(idx, (s, chunk))| {
                 write_vi_pairs_rawidx(s.as_ref(), idx as u32, max_distance, chunk, &hash_builder);
             });
@@ -1233,7 +1222,6 @@ pub fn get_neighbors_across(
             .par_iter()
             .zip(vip_chunks_q.into_par_iter())
             .enumerate()
-            .with_min_len(100000)
             .for_each(|(idx, (s, chunk))| {
                 write_vi_pairs_ci(
                     s.as_ref(),
@@ -1248,7 +1236,6 @@ pub fn get_neighbors_across(
             .par_iter()
             .zip(vip_chunks_r.into_par_iter())
             .enumerate()
-            .with_min_len(100000)
             .for_each(|(idx, (s, chunk))| {
                 write_vi_pairs_ci(
                     s.as_ref(),
@@ -1320,7 +1307,6 @@ pub fn get_hamming_neighbors_within(
             .par_iter()
             .zip(vip_chunks.into_par_iter())
             .enumerate()
-            .with_min_len(100000)
             .for_each(|(idx, (s, chunk))| {
                 write_vi_pairs_rawidx_hamming(
                     s.as_ref(),
@@ -1406,7 +1392,6 @@ pub fn get_hamming_neighbors_across(
             .par_iter()
             .zip(vip_chunks_q.into_par_iter())
             .enumerate()
-            .with_min_len(100000)
             .for_each(|(idx, (s, chunk))| {
                 write_vi_pairs_ci_hamming(
                     s.as_ref(),
@@ -1421,7 +1406,6 @@ pub fn get_hamming_neighbors_across(
             .par_iter()
             .zip(vip_chunks_r.into_par_iter())
             .enumerate()
-            .with_min_len(100000)
             .for_each(|(idx, (s, chunk))| {
                 write_vi_pairs_ci_hamming(
                     s.as_ref(),
@@ -1516,7 +1500,7 @@ fn write_vi_pairs_rawidx(
     input: &str,
     input_idx: u32,
     max_deletions: MaxDistance,
-    chunk: &mut [MaybeUninit<(u64, u32)>],
+    chunk: &mut [MaybeUninit<(u32, u32)>],
     hash_builder: &impl BuildHasher,
 ) {
     let input_length = input.len();
@@ -1552,7 +1536,7 @@ fn write_vi_pairs_ci(
     input_idx: u32,
     max_deletions: MaxDistance,
     is_ref: bool,
-    chunk: &mut [MaybeUninit<(u64, CrossIndex)>],
+    chunk: &mut [MaybeUninit<(u32, CrossIndex)>],
     hash_builder: &impl BuildHasher,
 ) {
     let input_length = input.len();
@@ -1594,7 +1578,7 @@ fn write_vi_pairs_rawidx_hamming(
     input: &str,
     input_idx: u32,
     max_deletions: MaxDistance,
-    chunk: &mut [MaybeUninit<(u64, u32)>],
+    chunk: &mut [MaybeUninit<(u32, u32)>],
     hash_builder: &impl BuildHasher,
 ) {
     const NULL_CHARACTER: u8 = u8::MAX;
@@ -1631,7 +1615,7 @@ fn write_vi_pairs_ci_hamming(
     input_idx: u32,
     max_deletions: MaxDistance,
     is_ref: bool,
-    chunk: &mut [MaybeUninit<(u64, CrossIndex)>],
+    chunk: &mut [MaybeUninit<(u32, CrossIndex)>],
     hash_builder: &impl BuildHasher,
 ) {
     const NULL_CHARACTER: u8 = u8::MAX;
@@ -1674,7 +1658,7 @@ fn write_vi_pairs_cached_hamming(
     input: &str,
     input_idx: u32,
     max_deletions: MaxDistance,
-    chunk: &mut [MaybeUninit<(u64, u32)>],
+    chunk: &mut [MaybeUninit<(u32, u32)>],
     hash_builder: &impl BuildHasher,
 ) {
     const NULL_CHARACTER: u8 = u8::MAX;
@@ -1706,10 +1690,10 @@ fn write_vi_pairs_cached_hamming(
     }
 }
 
-fn hash_string(s: impl AsRef<[u8]>, hash_builder: &impl BuildHasher) -> u64 {
+fn hash_string(s: impl AsRef<[u8]>, hash_builder: &impl BuildHasher) -> u32 {
     let mut hasher = hash_builder.build_hasher();
     hasher.write(s.as_ref());
-    hasher.finish()
+    hasher.finish() as u32
 }
 
 fn prealloc_maybeuninit_vec<T>(total_capacity: usize) -> Vec<MaybeUninit<T>> {
@@ -1778,7 +1762,7 @@ fn get_disjoint_chunks_mut_cross<'a, T>(
     (chunks_a, chunks_b)
 }
 
-fn collect_convergent_indices(mut variant_index_pairs: Vec<(u64, u32)>) -> (Vec<u32>, Vec<usize>) {
+fn collect_convergent_indices(mut variant_index_pairs: Vec<(u32, u32)>) -> (Vec<u32>, Vec<usize>) {
     variant_index_pairs.par_sort_unstable();
     variant_index_pairs.dedup();
 
@@ -1808,7 +1792,7 @@ fn collect_convergent_indices(mut variant_index_pairs: Vec<(u64, u32)>) -> (Vec<
 }
 
 fn collect_convergent_indices_cross(
-    mut variant_index_pairs: Vec<(u64, CrossIndex)>,
+    mut variant_index_pairs: Vec<(u32, CrossIndex)>,
 ) -> (Vec<u32>, Vec<(usize, usize)>) {
     variant_index_pairs.par_sort_unstable();
     variant_index_pairs.dedup();
@@ -1908,7 +1892,6 @@ fn get_hit_candidates_within(convergent_indices: &[impl AsRef<[u32]> + Sync]) ->
     convergent_indices
         .par_iter()
         .zip(hc_chunks.into_par_iter())
-        .with_min_len(100000)
         .for_each(|(indices, chunk)| {
             for (i, candidate) in indices
                 .as_ref()
@@ -1946,7 +1929,6 @@ where
     convergent_indices
         .par_iter()
         .zip(hc_chunks.into_par_iter())
-        .with_min_len(100000)
         .for_each(|((indices_q, indices_r), chunk)| {
             for (i, candidate) in indices_q
                 .as_ref()
@@ -1975,7 +1957,6 @@ fn compute_dists_levenshtein(
 ) -> Vec<u8> {
     hit_candidates
         .par_iter()
-        .with_min_len(100000)
         .map(|&(idx_query, idx_reference)| {
             match levenshtein::distance_with_args(
                 query[idx_query as usize].as_ref().bytes(),
@@ -1997,7 +1978,6 @@ fn compute_dists_hamming(
 ) -> Vec<u8> {
     hit_candidates
         .par_iter()
-        .with_min_len(100000)
         .map(|&(idx_query, idx_reference)| {
             debug_assert!(
                 query[idx_query as usize].as_ref().len()
