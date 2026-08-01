@@ -31,7 +31,8 @@ faster for the above use case.
 brew install yutanagano/tap/symscan-cli
 ```
 
-Or via installation from source
+Or install from source:
+
 ```sh
 git clone https://github.com/yutanagano/symscan.git
 cd symscan
@@ -54,8 +55,9 @@ pip install symscan
 
 ### CLI
 
-SymScan takes in a list of strings (one per line) via stdin, and returns which ones are within one Levenshtein edit (the default) of each other. Each output line is
-`<line 1>,<line 2>,<edit distance>` (1-indexed):
+SymScan takes in a list of strings (one per line) via stdin, and returns which
+ones are within one Levenshtein edit (the default) of each other. Each output
+line is `<line 1>,<line 2>,<edit distance>` (1-indexed):
 
 ```sh
 $ echo $'fizz\nfuzz\nbuzz\nfizzy' | symscan
