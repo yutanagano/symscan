@@ -1,3 +1,9 @@
+## Version 0.8.3
+
+- Performance improvements:
+  - Reduced heap memory usage (~25% runtime improvement)
+  - Improved parallelism (up to 80% improvement depending on workload)
+
 ## Version 0.8.2
 
 - Bumped dependency versions, notably of PyO3 which had a security
