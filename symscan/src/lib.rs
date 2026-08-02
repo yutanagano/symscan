@@ -1252,6 +1252,61 @@ trait VariantIndex: Copy {}
 impl VariantIndex for u32 {}
 impl VariantIndex for CrossIndex {}
 
+/// Invoke `f` once for every lexicographic combination of `k` distinct indices from `0..n`.
+///
+/// Special-cases `k == 1` and `k == 2` with tight nested loops. Larger `k` uses an in-place
+/// combination stepper over a stack buffer (no per-combination heap allocation).
+fn for_each_combination(n: usize, k: usize, mut f: impl FnMut(&[usize])) {
+    if k > n {
+        return;
+    }
+    if k == 0 {
+        f(&[]);
+        return;
+    }
+
+    match k {
+        1 => {
+            for i in 0..n {
+                f(&[i]);
+            }
+        }
+        2 => {
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    f(&[i, j]);
+                }
+            }
+        }
+        _ => {
+            // max_distance is capped at u8::MAX - 1, so k fits in this stack buffer.
+            debug_assert!(k < 256);
+            let mut indices = [0usize; 256];
+            for i in 0..k {
+                indices[i] = i;
+            }
+            loop {
+                f(&indices[..k]);
+
+                let mut i = k;
+                loop {
+                    if i == 0 {
+                        return;
+                    }
+                    i -= 1;
+                    if indices[i] < n - k + i {
+                        indices[i] += 1;
+                        for j in (i + 1)..k {
+                            indices[j] = indices[j - 1] + 1;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Generate deletion variants by dropping deleted characters (Levenshtein / true deletions), for
 /// depths `0..=max_deletions`.
 fn write_vi_pairs_true_deletions<I: VariantIndex, H: BuildHasher>(
@@ -1262,29 +1317,31 @@ fn write_vi_pairs_true_deletions<I: VariantIndex, H: BuildHasher>(
     hash_builder: &H,
 ) {
     let input_length = input.len();
+    let input_bytes = input.as_bytes();
 
     chunk[0].write((hash_string(input, hash_builder), index));
 
     let mut variant_idx = 1;
     let mut variant_buffer = Vec::with_capacity(input_length);
     for num_deletions in 1..=max_deletions.as_u8() {
-        if num_deletions as usize > input_length {
+        let k = num_deletions as usize;
+        if k > input_length {
             break;
         }
 
-        for deletion_indices in (0..input_length).combinations(num_deletions as usize) {
+        for_each_combination(input_length, k, |deletion_indices| {
             variant_buffer.clear();
             let mut offset = 0;
 
-            for idx in deletion_indices {
-                variant_buffer.extend_from_slice(&input.as_bytes()[offset..idx]);
+            for &idx in deletion_indices {
+                variant_buffer.extend_from_slice(&input_bytes[offset..idx]);
                 offset = idx + 1;
             }
-            variant_buffer.extend_from_slice(&input.as_bytes()[offset..input_length]);
+            variant_buffer.extend_from_slice(&input_bytes[offset..input_length]);
 
             chunk[variant_idx].write((hash_string(&variant_buffer, hash_builder), index));
             variant_idx += 1;
-        }
+        });
     }
 }
 
@@ -1299,30 +1356,30 @@ fn write_vi_pairs_exact_null<I: VariantIndex, H: BuildHasher>(
 ) {
     const NULL_CHARACTER: u8 = u8::MAX;
     let input_length = input.len();
+    let input_bytes = input.as_bytes();
     let mut variant_buffer = Vec::with_capacity(input_length);
 
     if max_deletions.as_usize() >= input_length {
-        variant_buffer.fill(NULL_CHARACTER);
-        chunk[0].write((hash_string(variant_buffer, hash_builder), index));
+        variant_buffer.resize(input_length, NULL_CHARACTER);
+        chunk[0].write((hash_string(&variant_buffer, hash_builder), index));
         return;
     }
 
-    for (variant_idx, deletion_indices) in (0..input_length)
-        .combinations(max_deletions.as_usize())
-        .enumerate()
-    {
+    let mut variant_idx = 0;
+    for_each_combination(input_length, max_deletions.as_usize(), |deletion_indices| {
         variant_buffer.clear();
         let mut cursor = 0;
 
-        for idx in deletion_indices {
-            variant_buffer.extend_from_slice(&input.as_bytes()[cursor..idx]);
+        for &idx in deletion_indices {
+            variant_buffer.extend_from_slice(&input_bytes[cursor..idx]);
             variant_buffer.push(NULL_CHARACTER);
             cursor = idx + 1;
         }
-        variant_buffer.extend_from_slice(&input.as_bytes()[cursor..input_length]);
+        variant_buffer.extend_from_slice(&input_bytes[cursor..input_length]);
 
         chunk[variant_idx].write((hash_string(&variant_buffer, hash_builder), index));
-    }
+        variant_idx += 1;
+    });
 }
 
 /// Generate deletion variants with null-character placeholders for depths `0..=max_deletions`
@@ -1336,30 +1393,32 @@ fn write_vi_pairs_up_to_null<I: VariantIndex, H: BuildHasher>(
 ) {
     const NULL_CHARACTER: u8 = u8::MAX;
     let input_length = input.len();
+    let input_bytes = input.as_bytes();
 
     chunk[0].write((hash_string(input, hash_builder), index));
 
     let mut variant_idx = 1;
     let mut variant_buffer = Vec::with_capacity(input_length);
     for num_deletions in 1..=max_deletions.as_u8() {
-        if num_deletions as usize > input_length {
+        let k = num_deletions as usize;
+        if k > input_length {
             break;
         }
 
-        for deletion_indices in (0..input_length).combinations(num_deletions as usize) {
+        for_each_combination(input_length, k, |deletion_indices| {
             variant_buffer.clear();
             let mut cursor = 0;
 
-            for idx in deletion_indices {
-                variant_buffer.extend_from_slice(&input.as_bytes()[cursor..idx]);
+            for &idx in deletion_indices {
+                variant_buffer.extend_from_slice(&input_bytes[cursor..idx]);
                 variant_buffer.push(NULL_CHARACTER);
                 cursor = idx + 1;
             }
-            variant_buffer.extend_from_slice(&input.as_bytes()[cursor..input_length]);
+            variant_buffer.extend_from_slice(&input_bytes[cursor..input_length]);
 
             chunk[variant_idx].write((hash_string(&variant_buffer, hash_builder), index));
             variant_idx += 1;
-        }
+        });
     }
 }
 
@@ -1687,6 +1746,45 @@ mod tests {
             let result = get_num_k_combs(n, k);
             assert_eq!(result, expected);
         }
+    }
+
+    #[test]
+    fn test_for_each_combination() {
+        let mut ours = Vec::new();
+        for_each_combination(5, 3, |idxs| ours.push(idxs.to_vec()));
+        let expected = vec![
+            [0, 1, 2],
+            [0, 1, 3],
+            [0, 1, 4],
+            [0, 2, 3],
+            [0, 2, 4],
+            [0, 3, 4],
+            [1, 2, 3],
+            [1, 2, 4],
+            [1, 3, 4],
+            [2, 3, 4],
+        ];
+        assert_eq!(ours, expected);
+
+        // Also cover k > n (should yield nothing).
+        let mut ours = Vec::new();
+        for_each_combination(5, 6, |idxs| ours.push(idxs.to_vec()));
+        assert!(ours.is_empty());
+    }
+
+    #[test]
+    fn test_exact_null_full_deletions_hashes_null_bytes() {
+        let input = "ab";
+        let max_distance = MaxDistance::try_from(2).expect("legal");
+        let mut chunk = prealloc_maybeuninit_vec(1);
+        let hash_builder = FixedState::default();
+
+        write_vi_pairs_exact_null(input, 0u32, max_distance, &mut chunk, &hash_builder);
+
+        let pairs = unsafe { cast_to_initialised_vec(chunk) };
+        let expected = hash_string([u8::MAX, u8::MAX], &hash_builder);
+        assert_eq!(pairs[0].0, expected);
+        assert_eq!(pairs[0].1, 0);
     }
 
     #[test]
