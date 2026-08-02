@@ -27,7 +27,6 @@
 
 use foldhash::fast::FixedState;
 use hashbrown::HashMap;
-use itertools::Itertools;
 use rapidfuzz::distance::{hamming, levenshtein};
 use rayon::prelude::*;
 use std::fmt::Display;
@@ -431,7 +430,7 @@ impl<M: Metric> CachedStore<M> {
         check_strings_ascii(reference, InputType::Reference)?;
 
         let (str_store, str_spans) = {
-            let strlens = reference.iter().map(|s| s.as_ref().len()).collect_vec();
+            let strlens: Vec<_> = reference.iter().map(|s| s.as_ref().len()).collect();
 
             let mut str_store_uninit = prealloc_maybeuninit_vec(strlens.iter().sum());
             let str_spans = get_disjoint_spans(&strlens);
@@ -641,10 +640,10 @@ impl<M: Metric> CachedStore<M> {
             (q_idx_store, convergence_groups)
         };
 
-        let convergence_groups = convergence_groups
+        let convergence_groups: Vec<_> = convergence_groups
             .into_iter()
             .map(|(r, s)| (&q_idx_store[r], s))
-            .collect_vec();
+            .collect();
 
         let candidates = get_hit_candidates_across(&convergence_groups);
         let dists = self.compute_dists_partially_cached(&candidates, query, max_distance);
@@ -1209,7 +1208,7 @@ fn get_num_del_vars_per_string_up_to(
             }
             num_vars
         })
-        .collect_vec()
+        .collect()
 }
 
 /// Compute the total number of deletion variants per input string at exactly some number of
@@ -1227,7 +1226,7 @@ fn get_num_del_vars_per_string_at(
                 get_num_k_combs(s.as_ref().len(), max_distance.as_u8())
             }
         })
-        .collect_vec()
+        .collect()
 }
 
 fn get_num_k_combs(n: usize, k: u8) -> usize {
@@ -1612,10 +1611,10 @@ fn get_convergent_chunks_cross<'a, T>(
 }
 
 fn get_hit_candidates_within(convergent_indices: &[impl AsRef<[u32]> + Sync]) -> Vec<(u32, u32)> {
-    let num_hit_candidates = convergent_indices
+    let num_hit_candidates: Vec<_> = convergent_indices
         .iter()
         .map(|indices| get_num_k_combs(indices.as_ref().len(), 2))
-        .collect_vec();
+        .collect();
     let total_capacity = num_hit_candidates.iter().sum();
 
     let mut hit_candidates_uninit = prealloc_maybeuninit_vec(total_capacity);
@@ -1626,15 +1625,15 @@ fn get_hit_candidates_within(convergent_indices: &[impl AsRef<[u32]> + Sync]) ->
         .zip(hc_chunks.into_par_iter())
         .with_min_len(100000)
         .for_each(|(indices, chunk)| {
-            for (i, candidate) in indices
-                .as_ref()
-                .iter()
-                .copied()
-                .tuple_combinations()
-                .enumerate()
-            {
-                chunk[i].write(candidate);
+            let indices = indices.as_ref();
+            let mut i = 0;
+            for a in 0..indices.len() {
+                for b in (a + 1)..indices.len() {
+                    chunk[i].write((indices[a], indices[b]));
+                    i += 1;
+                }
             }
+            debug_assert_eq!(i, chunk.len());
         });
 
     let mut hit_candidates = unsafe { cast_to_initialised_vec(hit_candidates_uninit) };
@@ -1650,10 +1649,10 @@ where
     T: AsRef<[u32]> + Sync,
     U: AsRef<[u32]> + Sync,
 {
-    let num_hit_candidates = convergent_indices
+    let num_hit_candidates: Vec<_> = convergent_indices
         .iter()
         .map(|(qi, ri)| qi.as_ref().len() * ri.as_ref().len())
-        .collect_vec();
+        .collect();
     let total_capacity = num_hit_candidates.iter().sum();
 
     let mut hit_candidates_uninit = prealloc_maybeuninit_vec(total_capacity);
@@ -1664,15 +1663,16 @@ where
         .zip(hc_chunks.into_par_iter())
         .with_min_len(100000)
         .for_each(|((indices_q, indices_r), chunk)| {
-            for (i, candidate) in indices_q
-                .as_ref()
-                .iter()
-                .copied()
-                .cartesian_product(indices_r.as_ref().iter().copied())
-                .enumerate()
-            {
-                chunk[i].write(candidate);
+            let indices_q = indices_q.as_ref();
+            let indices_r = indices_r.as_ref();
+            let mut i = 0;
+            for &q in indices_q {
+                for &r in indices_r {
+                    chunk[i].write((q, r));
+                    i += 1;
+                }
             }
+            debug_assert_eq!(i, chunk.len());
         });
 
     let mut hit_candidates = unsafe { cast_to_initialised_vec(hit_candidates_uninit) };
@@ -1798,23 +1798,43 @@ mod tests {
     const TEST_QUERY: [&str; 5] = ["fizz", "fuzz", "buzz", "izzy", "lofi"];
     const TEST_REF: [&str; 3] = ["file", "tofu", "fizz"];
 
+    fn pair_combinations(n: u32) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        for a in 0..n {
+            for b in (a + 1)..n {
+                out.push((a, b));
+            }
+        }
+        out
+    }
+
+    fn cartesian_product(n: u32, m: u32) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        for a in 0..n {
+            for b in 0..m {
+                out.push((a, b));
+            }
+        }
+        out
+    }
+
     #[test]
     fn test_compute_dists() {
         let cases = [
             (
-                (0..5).tuple_combinations().collect_vec(),
+                pair_combinations(5),
                 &TEST_QUERY[..],
                 MaxDistance::try_from(1).expect("legal"),
                 vec![1, 255, 255, 255, 1, 255, 255, 255, 255, 255],
             ),
             (
-                (0..5).tuple_combinations().collect_vec(),
+                pair_combinations(5),
                 &TEST_QUERY[..],
                 MaxDistance::try_from(2).expect("legal"),
                 vec![1, 2, 2, 255, 1, 255, 255, 255, 255, 255],
             ),
             (
-                (0..5).cartesian_product(0..3).collect_vec(),
+                cartesian_product(5, 3),
                 &TEST_REF[..],
                 MaxDistance::try_from(1).expect("legal"),
                 vec![
@@ -1822,7 +1842,7 @@ mod tests {
                 ],
             ),
             (
-                (0..5).cartesian_product(0..3).collect_vec(),
+                cartesian_product(5, 3),
                 &TEST_REF[..],
                 MaxDistance::try_from(2).expect("legal"),
                 vec![
@@ -1841,7 +1861,7 @@ mod tests {
     fn test_get_true_hits() {
         let cases = [
             (
-                (0..5).tuple_combinations().collect_vec(),
+                pair_combinations(5),
                 vec![1, 255, 255, 255, 1, 255, 255, 255, 255, 255],
                 MaxDistance::try_from(1).expect("legal"),
                 NeighborPairs {
@@ -1851,7 +1871,7 @@ mod tests {
                 },
             ),
             (
-                (0..5).tuple_combinations().collect_vec(),
+                pair_combinations(5),
                 vec![1, 2, 2, 255, 1, 255, 255, 255, 255, 255],
                 MaxDistance::try_from(2).expect("legal"),
                 NeighborPairs {
@@ -1900,7 +1920,7 @@ mod tests {
 
         Cursor::new(bytes).lines().for_each(|v| {
             let line = v.expect("test files have valid lines");
-            let triplet = line.split(",").collect_vec();
+            let triplet: Vec<_> = line.split(",").collect();
             i.push(
                 triplet[0]
                     .parse::<u32>()

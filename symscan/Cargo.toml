@@ -13,7 +13,6 @@ readme = "README.md"
 [dependencies]
 foldhash = "0.2"
 hashbrown = { version = "0.16", features = ["rayon"] }
-itertools = "0.13"
 rapidfuzz = "0.5"
 rayon = "1.10"
 thiserror = "2.0"

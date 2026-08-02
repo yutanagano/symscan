@@ -746,7 +746,6 @@ dependencies = [
  "criterion",
  "foldhash",
  "hashbrown",
- "itertools",
  "rapidfuzz",
  "rayon",
  "thiserror",
