@@ -478,7 +478,6 @@ impl<M: Metric> CachedStore<M> {
             reference
                 .par_iter()
                 .zip(str_store_chunks.into_par_iter())
-                .with_min_len(100000)
                 .for_each(|(s, chunk)| {
                     debug_assert_eq!(s.as_ref().len(), chunk.len());
                     unsafe {
@@ -509,7 +508,6 @@ impl<M: Metric> CachedStore<M> {
                 .par_iter()
                 .zip(vip_chunks.into_par_iter())
                 .enumerate()
-                .with_min_len(100000)
                 .for_each_init(Vec::new, |scratch, (idx, (s, chunk))| {
                     M::write_cached_rawidx(
                         s.as_ref(),
@@ -629,7 +627,6 @@ impl<M: Metric> CachedStore<M> {
                 .par_iter()
                 .zip(vip_chunks.into_par_iter())
                 .enumerate()
-                .with_min_len(100000)
                 .for_each_init(Vec::new, |scratch, (idx, (s, chunk))| {
                     M::write_oneshot_rawidx(
                         s.as_ref(),
@@ -779,7 +776,6 @@ impl<M: Metric> CachedStore<M> {
     ) -> Vec<u8> {
         hit_candidates
             .par_iter()
-            .with_min_len(100000)
             .map(|&(idx_query, idx_reference)| {
                 M::distance(
                     query[idx_query as usize].as_ref(),
@@ -798,7 +794,6 @@ impl<M: Metric> CachedStore<M> {
     ) -> Vec<u8> {
         hit_candidates
             .par_iter()
-            .with_min_len(100000)
             .map(|&(idx_query, idx_reference)| {
                 M::distance(
                     query.get_str_at_index(idx_query as usize),
@@ -1123,7 +1118,6 @@ fn get_neighbors_within_impl<M: Metric>(
             .par_iter()
             .zip(vip_chunks.into_par_iter())
             .enumerate()
-            .with_min_len(100000)
             .for_each_init(Vec::new, |scratch, (idx, (s, chunk))| {
                 M::write_oneshot_rawidx(
                     s.as_ref(),
@@ -1188,7 +1182,6 @@ fn get_neighbors_across_impl<M: Metric>(
             .par_iter()
             .zip(vip_chunks_q.into_par_iter())
             .enumerate()
-            .with_min_len(100000)
             .for_each_init(Vec::new, |scratch, (idx, (s, chunk))| {
                 M::write_oneshot_ci(
                     s.as_ref(),
@@ -1204,7 +1197,6 @@ fn get_neighbors_across_impl<M: Metric>(
             .par_iter()
             .zip(vip_chunks_r.into_par_iter())
             .enumerate()
-            .with_min_len(100000)
             .for_each_init(Vec::new, |scratch, (idx, (s, chunk))| {
                 M::write_oneshot_ci(
                     s.as_ref(),
@@ -1677,7 +1669,6 @@ fn get_hit_candidates_within(convergent_indices: &[impl AsRef<[u32]> + Sync]) ->
     convergent_indices
         .par_iter()
         .zip(hc_chunks.into_par_iter())
-        .with_min_len(100000)
         .for_each(|(indices, chunk)| {
             let indices = indices.as_ref();
             let mut i = 0;
@@ -1715,7 +1706,6 @@ where
     convergent_indices
         .par_iter()
         .zip(hc_chunks.into_par_iter())
-        .with_min_len(100000)
         .for_each(|((indices_q, indices_r), chunk)| {
             let indices_q = indices_q.as_ref();
             let indices_r = indices_r.as_ref();
@@ -1745,7 +1735,6 @@ fn compute_dists<M: Metric>(
 ) -> Vec<u8> {
     hit_candidates
         .par_iter()
-        .with_min_len(100000)
         .map(|&(idx_query, idx_reference)| {
             M::distance(
                 query[idx_query as usize].as_ref(),
