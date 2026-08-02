@@ -257,6 +257,7 @@ trait Metric: Copy + Send + Sync + 'static {
         max_deletions: MaxDistance,
         chunk: &mut [MaybeUninit<(u64, u32)>],
         hash_builder: &H,
+        scratch: &mut Vec<u8>,
     );
 
     fn write_oneshot_ci<H: BuildHasher>(
@@ -266,6 +267,7 @@ trait Metric: Copy + Send + Sync + 'static {
         is_ref: bool,
         chunk: &mut [MaybeUninit<(u64, CrossIndex)>],
         hash_builder: &H,
+        scratch: &mut Vec<u8>,
     );
 
     fn write_cached_rawidx<H: BuildHasher>(
@@ -274,6 +276,7 @@ trait Metric: Copy + Send + Sync + 'static {
         max_deletions: MaxDistance,
         chunk: &mut [MaybeUninit<(u64, u32)>],
         hash_builder: &H,
+        scratch: &mut Vec<u8>,
     );
 
     fn distance(a: &str, b: &str, cutoff: usize) -> u8;
@@ -298,8 +301,16 @@ impl Metric for Levenshtein {
         max_deletions: MaxDistance,
         chunk: &mut [MaybeUninit<(u64, u32)>],
         hash_builder: &H,
+        scratch: &mut Vec<u8>,
     ) {
-        write_vi_pairs_true_deletions(input, input_idx, max_deletions, chunk, hash_builder);
+        write_vi_pairs_true_deletions(
+            input,
+            input_idx,
+            max_deletions,
+            chunk,
+            hash_builder,
+            scratch,
+        );
     }
 
     #[inline(always)]
@@ -310,6 +321,7 @@ impl Metric for Levenshtein {
         is_ref: bool,
         chunk: &mut [MaybeUninit<(u64, CrossIndex)>],
         hash_builder: &H,
+        scratch: &mut Vec<u8>,
     ) {
         write_vi_pairs_true_deletions(
             input,
@@ -317,6 +329,7 @@ impl Metric for Levenshtein {
             max_deletions,
             chunk,
             hash_builder,
+            scratch,
         );
     }
 
@@ -327,8 +340,16 @@ impl Metric for Levenshtein {
         max_deletions: MaxDistance,
         chunk: &mut [MaybeUninit<(u64, u32)>],
         hash_builder: &H,
+        scratch: &mut Vec<u8>,
     ) {
-        write_vi_pairs_true_deletions(input, input_idx, max_deletions, chunk, hash_builder);
+        write_vi_pairs_true_deletions(
+            input,
+            input_idx,
+            max_deletions,
+            chunk,
+            hash_builder,
+            scratch,
+        );
     }
 
     #[inline(always)]
@@ -357,8 +378,16 @@ impl Metric for Hamming {
         max_deletions: MaxDistance,
         chunk: &mut [MaybeUninit<(u64, u32)>],
         hash_builder: &H,
+        scratch: &mut Vec<u8>,
     ) {
-        write_vi_pairs_exact_null(input, input_idx, max_deletions, chunk, hash_builder);
+        write_vi_pairs_exact_null(
+            input,
+            input_idx,
+            max_deletions,
+            chunk,
+            hash_builder,
+            scratch,
+        );
     }
 
     #[inline(always)]
@@ -369,6 +398,7 @@ impl Metric for Hamming {
         is_ref: bool,
         chunk: &mut [MaybeUninit<(u64, CrossIndex)>],
         hash_builder: &H,
+        scratch: &mut Vec<u8>,
     ) {
         write_vi_pairs_exact_null(
             input,
@@ -376,6 +406,7 @@ impl Metric for Hamming {
             max_deletions,
             chunk,
             hash_builder,
+            scratch,
         );
     }
 
@@ -386,8 +417,16 @@ impl Metric for Hamming {
         max_deletions: MaxDistance,
         chunk: &mut [MaybeUninit<(u64, u32)>],
         hash_builder: &H,
+        scratch: &mut Vec<u8>,
     ) {
-        write_vi_pairs_up_to_null(input, input_idx, max_deletions, chunk, hash_builder);
+        write_vi_pairs_up_to_null(
+            input,
+            input_idx,
+            max_deletions,
+            chunk,
+            hash_builder,
+            scratch,
+        );
     }
 
     #[inline(always)]
@@ -471,13 +510,14 @@ impl<M: Metric> CachedStore<M> {
                 .zip(vip_chunks.into_par_iter())
                 .enumerate()
                 .with_min_len(100000)
-                .for_each(|(idx, (s, chunk))| {
+                .for_each_init(Vec::new, |scratch, (idx, (s, chunk))| {
                     M::write_cached_rawidx(
                         s.as_ref(),
                         idx as u32,
                         max_distance,
                         chunk,
                         &hash_builder,
+                        scratch,
                     );
                 });
 
@@ -590,13 +630,14 @@ impl<M: Metric> CachedStore<M> {
                 .zip(vip_chunks.into_par_iter())
                 .enumerate()
                 .with_min_len(100000)
-                .for_each(|(idx, (s, chunk))| {
+                .for_each_init(Vec::new, |scratch, (idx, (s, chunk))| {
                     M::write_oneshot_rawidx(
                         s.as_ref(),
                         idx as u32,
                         max_distance,
                         chunk,
                         &hash_builder,
+                        scratch,
                     );
                 });
 
@@ -1083,8 +1124,15 @@ fn get_neighbors_within_impl<M: Metric>(
             .zip(vip_chunks.into_par_iter())
             .enumerate()
             .with_min_len(100000)
-            .for_each(|(idx, (s, chunk))| {
-                M::write_oneshot_rawidx(s.as_ref(), idx as u32, max_distance, chunk, &hash_builder);
+            .for_each_init(Vec::new, |scratch, (idx, (s, chunk))| {
+                M::write_oneshot_rawidx(
+                    s.as_ref(),
+                    idx as u32,
+                    max_distance,
+                    chunk,
+                    &hash_builder,
+                    scratch,
+                );
             });
 
         let variant_index_pairs = unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
@@ -1141,7 +1189,7 @@ fn get_neighbors_across_impl<M: Metric>(
             .zip(vip_chunks_q.into_par_iter())
             .enumerate()
             .with_min_len(100000)
-            .for_each(|(idx, (s, chunk))| {
+            .for_each_init(Vec::new, |scratch, (idx, (s, chunk))| {
                 M::write_oneshot_ci(
                     s.as_ref(),
                     idx as u32,
@@ -1149,6 +1197,7 @@ fn get_neighbors_across_impl<M: Metric>(
                     false,
                     chunk,
                     &hash_builder,
+                    scratch,
                 );
             });
         reference
@@ -1156,7 +1205,7 @@ fn get_neighbors_across_impl<M: Metric>(
             .zip(vip_chunks_r.into_par_iter())
             .enumerate()
             .with_min_len(100000)
-            .for_each(|(idx, (s, chunk))| {
+            .for_each_init(Vec::new, |scratch, (idx, (s, chunk))| {
                 M::write_oneshot_ci(
                     s.as_ref(),
                     idx as u32,
@@ -1164,6 +1213,7 @@ fn get_neighbors_across_impl<M: Metric>(
                     true,
                     chunk,
                     &hash_builder,
+                    scratch,
                 );
             });
 
@@ -1314,6 +1364,7 @@ fn write_vi_pairs_true_deletions<I: VariantIndex, H: BuildHasher>(
     max_deletions: MaxDistance,
     chunk: &mut [MaybeUninit<(u64, I)>],
     hash_builder: &H,
+    scratch: &mut Vec<u8>,
 ) {
     let input_length = input.len();
     let input_bytes = input.as_bytes();
@@ -1321,7 +1372,7 @@ fn write_vi_pairs_true_deletions<I: VariantIndex, H: BuildHasher>(
     chunk[0].write((hash_string(input, hash_builder), index));
 
     let mut variant_idx = 1;
-    let mut variant_buffer = Vec::with_capacity(input_length);
+    scratch.reserve(input_length);
     for num_deletions in 1..=max_deletions.as_u8() {
         let k = num_deletions as usize;
         if k > input_length {
@@ -1329,16 +1380,16 @@ fn write_vi_pairs_true_deletions<I: VariantIndex, H: BuildHasher>(
         }
 
         for_each_combination(input_length, k, |deletion_indices| {
-            variant_buffer.clear();
+            scratch.clear();
             let mut offset = 0;
 
             for &idx in deletion_indices {
-                variant_buffer.extend_from_slice(&input_bytes[offset..idx]);
+                scratch.extend_from_slice(&input_bytes[offset..idx]);
                 offset = idx + 1;
             }
-            variant_buffer.extend_from_slice(&input_bytes[offset..input_length]);
+            scratch.extend_from_slice(&input_bytes[offset..input_length]);
 
-            chunk[variant_idx].write((hash_string(&variant_buffer, hash_builder), index));
+            chunk[variant_idx].write((hash_string(&*scratch, hash_builder), index));
             variant_idx += 1;
         });
     }
@@ -1352,31 +1403,33 @@ fn write_vi_pairs_exact_null<I: VariantIndex, H: BuildHasher>(
     max_deletions: MaxDistance,
     chunk: &mut [MaybeUninit<(u64, I)>],
     hash_builder: &H,
+    scratch: &mut Vec<u8>,
 ) {
     const NULL_CHARACTER: u8 = u8::MAX;
     let input_length = input.len();
     let input_bytes = input.as_bytes();
-    let mut variant_buffer = Vec::with_capacity(input_length);
+    scratch.reserve(input_length);
 
     if max_deletions.as_usize() >= input_length {
-        variant_buffer.resize(input_length, NULL_CHARACTER);
-        chunk[0].write((hash_string(&variant_buffer, hash_builder), index));
+        scratch.clear();
+        scratch.resize(input_length, NULL_CHARACTER);
+        chunk[0].write((hash_string(&*scratch, hash_builder), index));
         return;
     }
 
     let mut variant_idx = 0;
     for_each_combination(input_length, max_deletions.as_usize(), |deletion_indices| {
-        variant_buffer.clear();
+        scratch.clear();
         let mut cursor = 0;
 
         for &idx in deletion_indices {
-            variant_buffer.extend_from_slice(&input_bytes[cursor..idx]);
-            variant_buffer.push(NULL_CHARACTER);
+            scratch.extend_from_slice(&input_bytes[cursor..idx]);
+            scratch.push(NULL_CHARACTER);
             cursor = idx + 1;
         }
-        variant_buffer.extend_from_slice(&input_bytes[cursor..input_length]);
+        scratch.extend_from_slice(&input_bytes[cursor..input_length]);
 
-        chunk[variant_idx].write((hash_string(&variant_buffer, hash_builder), index));
+        chunk[variant_idx].write((hash_string(&*scratch, hash_builder), index));
         variant_idx += 1;
     });
 }
@@ -1389,6 +1442,7 @@ fn write_vi_pairs_up_to_null<I: VariantIndex, H: BuildHasher>(
     max_deletions: MaxDistance,
     chunk: &mut [MaybeUninit<(u64, I)>],
     hash_builder: &H,
+    scratch: &mut Vec<u8>,
 ) {
     const NULL_CHARACTER: u8 = u8::MAX;
     let input_length = input.len();
@@ -1397,7 +1451,7 @@ fn write_vi_pairs_up_to_null<I: VariantIndex, H: BuildHasher>(
     chunk[0].write((hash_string(input, hash_builder), index));
 
     let mut variant_idx = 1;
-    let mut variant_buffer = Vec::with_capacity(input_length);
+    scratch.reserve(input_length);
     for num_deletions in 1..=max_deletions.as_u8() {
         let k = num_deletions as usize;
         if k > input_length {
@@ -1405,17 +1459,17 @@ fn write_vi_pairs_up_to_null<I: VariantIndex, H: BuildHasher>(
         }
 
         for_each_combination(input_length, k, |deletion_indices| {
-            variant_buffer.clear();
+            scratch.clear();
             let mut cursor = 0;
 
             for &idx in deletion_indices {
-                variant_buffer.extend_from_slice(&input_bytes[cursor..idx]);
-                variant_buffer.push(NULL_CHARACTER);
+                scratch.extend_from_slice(&input_bytes[cursor..idx]);
+                scratch.push(NULL_CHARACTER);
                 cursor = idx + 1;
             }
-            variant_buffer.extend_from_slice(&input_bytes[cursor..input_length]);
+            scratch.extend_from_slice(&input_bytes[cursor..input_length]);
 
-            chunk[variant_idx].write((hash_string(&variant_buffer, hash_builder), index));
+            chunk[variant_idx].write((hash_string(&*scratch, hash_builder), index));
             variant_idx += 1;
         });
     }
@@ -1778,8 +1832,16 @@ mod tests {
         let max_distance = MaxDistance::try_from(2).expect("legal");
         let mut chunk = prealloc_maybeuninit_vec(1);
         let hash_builder = FixedState::default();
+        let mut scratch = Vec::new();
 
-        write_vi_pairs_exact_null(input, 0u32, max_distance, &mut chunk, &hash_builder);
+        write_vi_pairs_exact_null(
+            input,
+            0u32,
+            max_distance,
+            &mut chunk,
+            &hash_builder,
+            &mut scratch,
+        );
 
         let pairs = unsafe { cast_to_initialised_vec(chunk) };
         let expected = hash_string([u8::MAX, u8::MAX], &hash_builder);
