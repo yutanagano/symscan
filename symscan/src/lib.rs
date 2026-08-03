@@ -431,17 +431,13 @@ impl Metric for Hamming {
 
     #[inline(always)]
     fn distance(a: &str, b: &str, cutoff: usize) -> u8 {
-        debug_assert_eq!(a.len(), b.len());
-        match unsafe {
-            hamming::distance_with_args(
-                a.bytes(),
-                b.bytes(),
-                &hamming::Args::default().score_cutoff(cutoff),
-            )
-            .unwrap_unchecked()
-        } {
-            None => u8::MAX,
-            Some(dist) => dist as u8,
+        match hamming::distance_with_args(
+            a.bytes(),
+            b.bytes(),
+            &hamming::Args::default().score_cutoff(cutoff),
+        ) {
+            Ok(Some(dist)) => dist as u8,
+            _ => u8::MAX,
         }
     }
 }
