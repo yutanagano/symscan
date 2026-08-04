@@ -515,45 +515,27 @@ impl<M: Metric> CachedStore<M> {
                     );
                 });
 
-            let mut variant_index_pairs =
+            let variant_index_pairs =
                 unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
 
-            variant_index_pairs.par_sort_unstable();
-            variant_index_pairs.dedup();
-
-            let mut total_num_convergent_indices = 0;
-            let mut num_convergence_groups = 0;
-
-            variant_index_pairs
-                .chunk_by(|(v1, _), (v2, _)| v1 == v2)
-                .for_each(|chunk| {
-                    total_num_convergent_indices += chunk.len();
-                    num_convergence_groups += 1;
-                });
-
-            let mut convergent_indices = Vec::with_capacity(total_num_convergent_indices);
-            let mut convergence_groups = Vec::with_capacity(num_convergence_groups);
-            let mut cursor = 0;
-
-            variant_index_pairs
-                .chunk_by(|(v1, _), (v2, _)| v1 == v2)
-                .for_each(|chunk| {
-                    convergent_indices.extend(chunk.iter().map(|&(_, i)| i));
-                    convergence_groups.push((chunk[0].0, Span::new(cursor, chunk.len())));
-                    cursor += chunk.len();
-                });
-
-            debug_assert_eq!(cursor, convergent_indices.len());
-
-            (convergent_indices, convergence_groups)
+            // Every group is kept, including singletons: the variant map must hold every reference
+            // variant for cross queries to find it.
+            collect_convergent_indices(variant_index_pairs, |group| {
+                let len = distinct(group).count();
+                Some((len, (group[0].0, len)))
+            })
         };
 
         let mut variant_map =
             HashMap::with_capacity_and_hasher(convergence_groups.len(), IdentityHasherBuilder);
+        let mut cursor = 0;
 
-        for (v_hash, index_range) in convergence_groups {
-            variant_map.entry(v_hash).insert(index_range);
+        for (v_hash, len) in convergence_groups {
+            variant_map.entry(v_hash).insert(Span::new(cursor, len));
+            cursor += len;
         }
+
+        debug_assert_eq!(cursor, index_store.len());
 
         Ok(CachedStore {
             str_store,
@@ -634,50 +616,27 @@ impl<M: Metric> CachedStore<M> {
                     );
                 });
 
-            let mut variant_index_pairs =
+            let variant_index_pairs =
                 unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
 
-            variant_index_pairs.par_sort_unstable();
-            variant_index_pairs.dedup();
-
-            let mut total_num_convergent_q_indices = 0;
-            let mut num_convergence_groups = 0;
-
-            variant_index_pairs
-                .chunk_by(|(v1, _), (v2, _)| v1 == v2)
-                .for_each(|chunk| {
-                    let variant = &chunk[0].0;
-                    if self.variant_map.get(variant).is_some() {
-                        total_num_convergent_q_indices += chunk.len();
-                        num_convergence_groups += 1;
-                    }
-                });
-
-            let mut q_idx_store = Vec::with_capacity(total_num_convergent_q_indices);
-            let mut convergence_groups = Vec::with_capacity(num_convergence_groups);
-            let mut cursor = 0;
-
-            variant_index_pairs
-                .chunk_by(|(v1, _), (v2, _)| v1 == v2)
-                .for_each(|chunk| {
-                    let variant = &chunk[0].0;
-                    if let Some(span) = self.variant_map.get(variant) {
-                        q_idx_store.extend(chunk.iter().map(|&(_, i)| i));
-                        convergence_groups.push((
-                            cursor..cursor + chunk.len(),
-                            self.get_convergent_indices_from_span(span),
-                        ));
-                        cursor += chunk.len();
-                    }
-                });
-
-            (q_idx_store, convergence_groups)
+            collect_convergent_indices(variant_index_pairs, |group| {
+                let span = self.variant_map.get(&group[0].0)?;
+                let len_q = distinct(group).count();
+                Some((len_q, (len_q, self.get_convergent_indices_from_span(span))))
+            })
         };
 
+        let mut cursor = 0;
         let convergence_groups: Vec<_> = convergence_groups
             .into_iter()
-            .map(|(r, s)| (&q_idx_store[r], s))
+            .map(|(len_q, r_indices)| {
+                let group = (&q_idx_store[cursor..cursor + len_q], r_indices);
+                cursor += len_q;
+                group
+            })
             .collect();
+
+        debug_assert_eq!(cursor, q_idx_store.len());
 
         let candidates = get_hit_candidates_across(&convergence_groups);
         let dists = self.compute_dists_partially_cached(&candidates, query, max_distance);
@@ -1126,7 +1085,11 @@ fn get_neighbors_within_impl<M: Metric>(
             });
 
         let variant_index_pairs = unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
-        collect_convergent_indices(variant_index_pairs)
+        // Payload is the group size; both halves of (num_indices, payload) are the same value.
+        collect_convergent_indices(variant_index_pairs, |group| {
+            let len = distinct(group).count();
+            (len > 1).then_some((len, len))
+        })
     };
 
     let convergent_chunks = get_convergent_chunks(&group_sizes, &convergent_indices[..]);
@@ -1206,7 +1169,16 @@ fn get_neighbors_across_impl<M: Metric>(
             });
 
         let variant_index_pairs = unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
-        collect_convergent_indices_cross(variant_index_pairs)
+        collect_convergent_indices(variant_index_pairs, |group| {
+            let (len_q, len_r) = distinct(group).fold((0, 0), |(q, r), ci| {
+                if ci.is_ref() {
+                    (q, r + 1)
+                } else {
+                    (q + 1, r)
+                }
+            });
+            (len_q > 0 && len_r > 0).then_some((len_q + len_r, (len_q, len_r)))
+        })
     };
 
     let convergent_chunks = get_convergent_chunks_cross(&group_sizes, &convergent_indices[..]);
@@ -1583,35 +1555,18 @@ fn group_aligned_bounds<I: VariantIndex>(vip: &[(u64, I)], target: usize) -> Vec
     bounds
 }
 
-/// Per-group output size: total indices for within-set groups, `(len_q, len_r)` for cross-set.
-trait GroupSize: Copy + Send {
-    fn num_indices(&self) -> usize;
-}
-
-impl GroupSize for usize {
-    fn num_indices(&self) -> usize {
-        *self
-    }
-}
-
-impl GroupSize for (usize, usize) {
-    fn num_indices(&self) -> usize {
-        self.0 + self.1
-    }
-}
-
 /// Sort the variant-index pairs, then collect the indices of every convergent group in parallel.
 ///
-/// `describe` returns a group's output size, or `None` if the group should be skipped. It sees the
+/// `describe` returns `(num_indices, payload)` for a kept group, or `None` to skip it. It sees the
 /// group with duplicates still present, so it must count through [`distinct`].
-fn collect_convergent_groups<I: VariantIndex, S: GroupSize>(
+fn collect_convergent_indices<I: VariantIndex, Payload: Copy + Send>(
     mut variant_index_pairs: Vec<(u64, I)>,
-    target: usize,
-    describe: impl Fn(&[(u64, I)]) -> Option<S> + Send + Sync,
-) -> (Vec<u32>, Vec<S>) {
+    describe: impl Fn(&[(u64, I)]) -> Option<(usize, Payload)> + Send + Sync,
+) -> (Vec<u32>, Vec<Payload>) {
     variant_index_pairs.par_sort_unstable();
 
-    let bounds = group_aligned_bounds(&variant_index_pairs, target);
+    let bounds =
+        group_aligned_bounds(&variant_index_pairs, rayon::current_num_threads() * 4);
     let chunks: Vec<_> = bounds
         .windows(2)
         .map(|w| &variant_index_pairs[w[0]..w[1]])
@@ -1622,9 +1577,7 @@ fn collect_convergent_groups<I: VariantIndex, S: GroupSize>(
         .map(|chunk| {
             groups(chunk)
                 .filter_map(&describe)
-                .fold((0, 0), |(n_idx, n_grp), s| {
-                    (n_idx + s.num_indices(), n_grp + 1)
-                })
+                .fold((0, 0), |(n_idx, n_grp), (n, _)| (n_idx + n, n_grp + 1))
         })
         .collect();
 
@@ -1632,73 +1585,40 @@ fn collect_convergent_groups<I: VariantIndex, S: GroupSize>(
     let group_counts: Vec<usize> = counts.iter().map(|&(_, n)| n).collect();
 
     let mut indices_uninit = prealloc_maybeuninit_vec(index_counts.iter().sum());
-    let mut sizes_uninit = prealloc_maybeuninit_vec(group_counts.iter().sum());
+    let mut payloads_uninit = prealloc_maybeuninit_vec(group_counts.iter().sum());
     let index_chunks = get_disjoint_chunks_mut(&index_counts, &mut indices_uninit[..]);
-    let size_chunks = get_disjoint_chunks_mut(&group_counts, &mut sizes_uninit[..]);
+    let payload_chunks = get_disjoint_chunks_mut(&group_counts, &mut payloads_uninit[..]);
 
     chunks
         .par_iter()
         .zip(index_chunks.into_par_iter())
-        .zip(size_chunks.into_par_iter())
-        .for_each(|((chunk, out_indices), out_sizes)| {
+        .zip(payload_chunks.into_par_iter())
+        .for_each(|((chunk, out_indices), out_payloads)| {
             let mut i = 0;
             let mut g = 0;
             for group in groups(chunk) {
-                let Some(size) = describe(group) else {
+                let Some((_, payload)) = describe(group) else {
                     continue;
                 };
                 for entry in distinct(group) {
                     out_indices[i].write(entry.raw_index());
                     i += 1;
                 }
-                out_sizes[g].write(size);
+                out_payloads[g].write(payload);
                 g += 1;
             }
             debug_assert_eq!(i, out_indices.len());
-            debug_assert_eq!(g, out_sizes.len());
+            debug_assert_eq!(g, out_payloads.len());
         });
 
     unsafe {
         (
             cast_to_initialised_vec(indices_uninit),
-            cast_to_initialised_vec(sizes_uninit),
+            cast_to_initialised_vec(payloads_uninit),
         )
     }
 }
 
-fn collect_convergent_indices(variant_index_pairs: Vec<(u64, u32)>) -> (Vec<u32>, Vec<usize>) {
-    collect_convergent_groups(
-        variant_index_pairs,
-        rayon::current_num_threads() * 4,
-        |group| {
-            let len = distinct(group).count();
-            (len > 1).then_some(len)
-        },
-    )
-}
-
-fn collect_convergent_indices_cross(
-    variant_index_pairs: Vec<(u64, CrossIndex)>,
-) -> (Vec<u32>, Vec<(usize, usize)>) {
-    collect_convergent_groups(
-        variant_index_pairs,
-        rayon::current_num_threads() * 4,
-        |group| {
-            let (len_q, len_r) =
-                distinct(group).fold(
-                    (0, 0),
-                    |(q, r), ci| {
-                        if ci.is_ref() {
-                            (q, r + 1)
-                        } else {
-                            (q + 1, r)
-                        }
-                    },
-                );
-            (len_q > 0 && len_r > 0).then_some((len_q, len_r))
-        },
-    )
-}
 
 /// Given a contiguous slice of indices and a slice of sizes that demarcate chunks of indices that
 /// converge to the same deletion variant, return a vector of slices where each slice groups
@@ -1911,17 +1831,30 @@ mod tests {
 
     #[test]
     fn test_collect_convergent_indices() {
+        let within = |vip: Vec<(u64, u32)>| {
+            collect_convergent_indices(vip, |group| {
+                let len = distinct(group).count();
+                (len > 1).then_some((len, len))
+            })
+        };
+        let cross = |vip: Vec<(u64, CrossIndex)>| {
+            collect_convergent_indices(vip, |group| {
+                let (len_q, len_r) = distinct(group).fold((0, 0), |(q, r), ci| {
+                    if ci.is_ref() {
+                        (q, r + 1)
+                    } else {
+                        (q + 1, r)
+                    }
+                });
+                (len_q > 0 && len_r > 0).then_some((len_q + len_r, (len_q, len_r)))
+            })
+        };
+
         // Singletons dropped; one multi-index group kept; duplicates collapsed.
+        assert_eq!(within(vec![(1, 0), (2, 1), (3, 2)]), (vec![], vec![]));
+        assert_eq!(within(vec![(1, 0), (1, 1), (1, 2)]), (vec![0, 1, 2], vec![3]));
         assert_eq!(
-            collect_convergent_indices(vec![(1, 0), (2, 1), (3, 2)]),
-            (vec![], vec![])
-        );
-        assert_eq!(
-            collect_convergent_indices(vec![(1, 0), (1, 1), (1, 2)]),
-            (vec![0, 1, 2], vec![3])
-        );
-        assert_eq!(
-            collect_convergent_indices(vec![
+            within(vec![
                 (1, 0),
                 (1, 0),
                 (1, 1),
@@ -1935,24 +1868,18 @@ mod tests {
         );
         // Unsorted input is sorted first.
         assert_eq!(
-            collect_convergent_indices(vec![(3, 1), (1, 0), (3, 0), (2, 2), (1, 1)]),
+            within(vec![(3, 1), (1, 0), (3, 0), (2, 2), (1, 1)]),
             (vec![0, 1, 0, 1], vec![2, 2])
         );
-        assert_eq!(collect_convergent_indices(vec![]), (vec![], vec![]));
+        assert_eq!(within(vec![]), (vec![], vec![]));
 
         // Same-side-only groups dropped; cross group keeps query then ref indices.
         let q = |i| CrossIndex::from(i, false);
         let r = |i| CrossIndex::from(i, true);
+        assert_eq!(cross(vec![(1, q(0)), (1, q(1))]), (vec![], vec![]));
+        assert_eq!(cross(vec![(1, r(0)), (1, r(1))]), (vec![], vec![]));
         assert_eq!(
-            collect_convergent_indices_cross(vec![(1, q(0)), (1, q(1))]),
-            (vec![], vec![])
-        );
-        assert_eq!(
-            collect_convergent_indices_cross(vec![(1, r(0)), (1, r(1))]),
-            (vec![], vec![])
-        );
-        assert_eq!(
-            collect_convergent_indices_cross(vec![
+            cross(vec![
                 (1, q(0)),
                 (1, q(0)),
                 (1, q(1)),
@@ -1963,7 +1890,7 @@ mod tests {
             ]),
             (vec![0, 1, 0, 2], vec![(2, 2)])
         );
-        assert_eq!(collect_convergent_indices_cross(vec![]), (vec![], vec![]));
+        assert_eq!(cross(vec![]), (vec![], vec![]));
     }
 
     #[test]
