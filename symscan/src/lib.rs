@@ -150,19 +150,39 @@ mod utils {
         pub fn get_value(&self) -> u32 {
             self.0 & Self::VALUE_MASK
         }
+
+        pub fn bits(self) -> u32 {
+            self.0
+        }
+
+        pub fn from_bits(bits: u32) -> Self {
+            Self(bits)
+        }
     }
 }
 
-#[derive(Default)]
-struct IdentityHasher(u64);
+/// Multiplier for spreading a 32-bit key over 64 bits: the odd integer nearest `2^64 / phi`.
+///
+/// Multiplying by an odd constant is a bijection modulo 2^64, and this constant's bit pattern is
+/// dense enough that carries propagate every input bit into the high bits of the product. Known
+/// as Knuth's multiplicative hashing, or Fibonacci hashing.
+const GOLDEN_RATIO_64: u64 = 0x9E37_79B9_7F4A_7C15;
 
-impl Hasher for IdentityHasher {
+#[derive(Default)]
+struct VariantHasher(u64);
+
+impl Hasher for VariantHasher {
     fn write(&mut self, bytes: &[u8]) {
-        unreachable!("hasher only designed for u64, got {bytes:?}");
+        unreachable!("hasher only designed for u32 variant hashes, got {bytes:?}");
     }
 
-    fn write_u64(&mut self, i: u64) {
-        self.0 = i
+    /// Spread the 32-bit variant hash across all 64 bits.
+    ///
+    /// hashbrown picks the bucket from the low bits of the hash and derives its SIMD control byte
+    /// from the top 7, so a 32-bit key has to occupy both ends. Zero-extending would pin every
+    /// control byte to zero; shifting into the high half would pin every key to bucket zero.
+    fn write_u32(&mut self, i: u32) {
+        self.0 = (i as u64).wrapping_mul(GOLDEN_RATIO_64);
     }
 
     fn finish(&self) -> u64 {
@@ -171,13 +191,13 @@ impl Hasher for IdentityHasher {
 }
 
 #[derive(Default)]
-struct IdentityHasherBuilder;
+struct VariantHasherBuilder;
 
-impl BuildHasher for IdentityHasherBuilder {
-    type Hasher = IdentityHasher;
+impl BuildHasher for VariantHasherBuilder {
+    type Hasher = VariantHasher;
 
     fn build_hasher(&self) -> Self::Hasher {
-        IdentityHasher::default()
+        VariantHasher::default()
     }
 }
 
@@ -255,7 +275,7 @@ trait Metric: Copy + Send + Sync + 'static {
         input: &str,
         input_idx: u32,
         max_deletions: MaxDistance,
-        chunk: &mut [MaybeUninit<(u64, u32)>],
+        chunk: &mut [MaybeUninit<u64>],
         hash_builder: &H,
         scratch: &mut Vec<u8>,
     );
@@ -265,7 +285,7 @@ trait Metric: Copy + Send + Sync + 'static {
         input_idx: u32,
         max_deletions: MaxDistance,
         is_ref: bool,
-        chunk: &mut [MaybeUninit<(u64, CrossIndex)>],
+        chunk: &mut [MaybeUninit<u64>],
         hash_builder: &H,
         scratch: &mut Vec<u8>,
     );
@@ -274,7 +294,7 @@ trait Metric: Copy + Send + Sync + 'static {
         input: &str,
         input_idx: u32,
         max_deletions: MaxDistance,
-        chunk: &mut [MaybeUninit<(u64, u32)>],
+        chunk: &mut [MaybeUninit<u64>],
         hash_builder: &H,
         scratch: &mut Vec<u8>,
     );
@@ -299,7 +319,7 @@ impl Metric for Levenshtein {
         input: &str,
         input_idx: u32,
         max_deletions: MaxDistance,
-        chunk: &mut [MaybeUninit<(u64, u32)>],
+        chunk: &mut [MaybeUninit<u64>],
         hash_builder: &H,
         scratch: &mut Vec<u8>,
     ) {
@@ -319,7 +339,7 @@ impl Metric for Levenshtein {
         input_idx: u32,
         max_deletions: MaxDistance,
         is_ref: bool,
-        chunk: &mut [MaybeUninit<(u64, CrossIndex)>],
+        chunk: &mut [MaybeUninit<u64>],
         hash_builder: &H,
         scratch: &mut Vec<u8>,
     ) {
@@ -338,7 +358,7 @@ impl Metric for Levenshtein {
         input: &str,
         input_idx: u32,
         max_deletions: MaxDistance,
-        chunk: &mut [MaybeUninit<(u64, u32)>],
+        chunk: &mut [MaybeUninit<u64>],
         hash_builder: &H,
         scratch: &mut Vec<u8>,
     ) {
@@ -376,7 +396,7 @@ impl Metric for Hamming {
         input: &str,
         input_idx: u32,
         max_deletions: MaxDistance,
-        chunk: &mut [MaybeUninit<(u64, u32)>],
+        chunk: &mut [MaybeUninit<u64>],
         hash_builder: &H,
         scratch: &mut Vec<u8>,
     ) {
@@ -396,7 +416,7 @@ impl Metric for Hamming {
         input_idx: u32,
         max_deletions: MaxDistance,
         is_ref: bool,
-        chunk: &mut [MaybeUninit<(u64, CrossIndex)>],
+        chunk: &mut [MaybeUninit<u64>],
         hash_builder: &H,
         scratch: &mut Vec<u8>,
     ) {
@@ -415,7 +435,7 @@ impl Metric for Hamming {
         input: &str,
         input_idx: u32,
         max_deletions: MaxDistance,
-        chunk: &mut [MaybeUninit<(u64, u32)>],
+        chunk: &mut [MaybeUninit<u64>],
         hash_builder: &H,
         scratch: &mut Vec<u8>,
     ) {
@@ -447,7 +467,7 @@ struct CachedStore<M: Metric> {
     str_store: Vec<u8>,
     str_spans: Vec<Span>,
     index_store: Vec<u32>,
-    variant_map: HashMap<u64, Span, IdentityHasherBuilder>,
+    variant_map: HashMap<u32, Span, VariantHasherBuilder>,
     max_distance: MaxDistance,
     _metric: PhantomData<M>,
 }
@@ -496,7 +516,7 @@ impl<M: Metric> CachedStore<M> {
             let num_vars_per_string = get_num_del_vars_per_string_up_to(reference, max_distance);
 
             let mut variant_index_pairs_uninit =
-                prealloc_maybeuninit_vec::<(u64, u32)>(num_vars_per_string.iter().sum());
+                prealloc_maybeuninit_vec::<u64>(num_vars_per_string.iter().sum());
             let vip_chunks =
                 get_disjoint_chunks_mut(&num_vars_per_string, &mut variant_index_pairs_uninit[..]);
 
@@ -520,14 +540,14 @@ impl<M: Metric> CachedStore<M> {
 
             // Every group is kept, including singletons: the variant map must hold every reference
             // variant for cross queries to find it.
-            collect_convergent_indices(variant_index_pairs, |group| {
+            collect_convergent_indices::<u32, _>(variant_index_pairs, |group| {
                 let len = distinct(group).count();
-                Some((len, (group[0].0, len)))
+                Some((len, ((group[0] >> 32) as u32, len)))
             })
         };
 
         let mut variant_map =
-            HashMap::with_capacity_and_hasher(convergence_groups.len(), IdentityHasherBuilder);
+            HashMap::with_capacity_and_hasher(convergence_groups.len(), VariantHasherBuilder);
         let mut cursor = 0;
 
         for (v_hash, len) in convergence_groups {
@@ -619,8 +639,8 @@ impl<M: Metric> CachedStore<M> {
             let variant_index_pairs =
                 unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
 
-            collect_convergent_indices(variant_index_pairs, |group| {
-                let span = self.variant_map.get(&group[0].0)?;
+            collect_convergent_indices::<u32, _>(variant_index_pairs, |group| {
+                let span = self.variant_map.get(&((group[0] >> 32) as u32))?;
                 let len_q = distinct(group).count();
                 Some((len_q, (len_q, self.get_convergent_indices_from_span(span))))
             })
@@ -1086,7 +1106,7 @@ fn get_neighbors_within_impl<M: Metric>(
 
         let variant_index_pairs = unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
         // Payload is the group size; both halves of (num_indices, payload) are the same value.
-        collect_convergent_indices(variant_index_pairs, |group| {
+        collect_convergent_indices::<u32, _>(variant_index_pairs, |group| {
             let len = distinct(group).count();
             (len > 1).then_some((len, len))
         })
@@ -1169,9 +1189,9 @@ fn get_neighbors_across_impl<M: Metric>(
             });
 
         let variant_index_pairs = unsafe { cast_to_initialised_vec(variant_index_pairs_uninit) };
-        collect_convergent_indices(variant_index_pairs, |group| {
-            let (len_q, len_r) = distinct(group).fold((0, 0), |(q, r), ci| {
-                if ci.is_ref() {
+        collect_convergent_indices::<CrossIndex, _>(variant_index_pairs, |group| {
+            let (len_q, len_r) = distinct(group).fold((0, 0), |(q, r), word| {
+                if CrossIndex::from_word(word).is_ref() {
                     (q, r + 1)
                 } else {
                     (q + 1, r)
@@ -1253,21 +1273,49 @@ fn get_num_k_combs(n: usize, k: u8) -> usize {
     num_subsamples / subsample_perms
 }
 
-/// Index stored alongside a variant hash in VIP tuples.
+/// Index packed into the low half of a VIP word alongside a 32-bit variant hash.
 ///
-/// Only [`u32`] (within / cached) and [`CrossIndex`] (across) are used.
-trait VariantIndex: Copy + Ord + PartialEq + Send + Sync {
+/// Only [`u32`] (within / cached) and [`CrossIndex`] (across) are used. The high half of each VIP
+/// word is a 32-bit foldhash truncation; collisions only ever add candidates that the distance
+/// check already filters.
+trait VariantIndex: Copy + Send + Sync {
+    fn pack(self, hash32: u32) -> u64;
+
+    fn from_word(word: u64) -> Self;
+
     /// The `u32` string index, discarding any query/reference tag.
     fn raw_index(self) -> u32;
 }
 
 impl VariantIndex for u32 {
+    #[inline(always)]
+    fn pack(self, hash32: u32) -> u64 {
+        ((hash32 as u64) << 32) | self as u64
+    }
+
+    #[inline(always)]
+    fn from_word(word: u64) -> Self {
+        word as u32
+    }
+
+    #[inline(always)]
     fn raw_index(self) -> u32 {
         self
     }
 }
 
 impl VariantIndex for CrossIndex {
+    #[inline(always)]
+    fn pack(self, hash32: u32) -> u64 {
+        ((hash32 as u64) << 32) | self.bits() as u64
+    }
+
+    #[inline(always)]
+    fn from_word(word: u64) -> Self {
+        CrossIndex::from_bits(word as u32)
+    }
+
+    #[inline(always)]
     fn raw_index(self) -> u32 {
         self.get_value()
     }
@@ -1334,14 +1382,14 @@ fn write_vi_pairs_true_deletions<I: VariantIndex, H: BuildHasher>(
     input: &str,
     index: I,
     max_deletions: MaxDistance,
-    chunk: &mut [MaybeUninit<(u64, I)>],
+    chunk: &mut [MaybeUninit<u64>],
     hash_builder: &H,
     scratch: &mut Vec<u8>,
 ) {
     let input_length = input.len();
     let input_bytes = input.as_bytes();
 
-    chunk[0].write((hash_string(input, hash_builder), index));
+    chunk[0].write(index.pack(hash_string(input, hash_builder)));
 
     let mut variant_idx = 1;
     scratch.reserve(input_length);
@@ -1361,7 +1409,7 @@ fn write_vi_pairs_true_deletions<I: VariantIndex, H: BuildHasher>(
             }
             scratch.extend_from_slice(&input_bytes[offset..input_length]);
 
-            chunk[variant_idx].write((hash_string(&*scratch, hash_builder), index));
+            chunk[variant_idx].write(index.pack(hash_string(&*scratch, hash_builder)));
             variant_idx += 1;
         });
     }
@@ -1373,7 +1421,7 @@ fn write_vi_pairs_exact_null<I: VariantIndex, H: BuildHasher>(
     input: &str,
     index: I,
     max_deletions: MaxDistance,
-    chunk: &mut [MaybeUninit<(u64, I)>],
+    chunk: &mut [MaybeUninit<u64>],
     hash_builder: &H,
     scratch: &mut Vec<u8>,
 ) {
@@ -1385,7 +1433,7 @@ fn write_vi_pairs_exact_null<I: VariantIndex, H: BuildHasher>(
     if max_deletions.as_usize() >= input_length {
         scratch.clear();
         scratch.resize(input_length, NULL_CHARACTER);
-        chunk[0].write((hash_string(&*scratch, hash_builder), index));
+        chunk[0].write(index.pack(hash_string(&*scratch, hash_builder)));
         return;
     }
 
@@ -1401,7 +1449,7 @@ fn write_vi_pairs_exact_null<I: VariantIndex, H: BuildHasher>(
         }
         scratch.extend_from_slice(&input_bytes[cursor..input_length]);
 
-        chunk[variant_idx].write((hash_string(&*scratch, hash_builder), index));
+        chunk[variant_idx].write(index.pack(hash_string(&*scratch, hash_builder)));
         variant_idx += 1;
     });
 }
@@ -1412,7 +1460,7 @@ fn write_vi_pairs_up_to_null<I: VariantIndex, H: BuildHasher>(
     input: &str,
     index: I,
     max_deletions: MaxDistance,
-    chunk: &mut [MaybeUninit<(u64, I)>],
+    chunk: &mut [MaybeUninit<u64>],
     hash_builder: &H,
     scratch: &mut Vec<u8>,
 ) {
@@ -1420,7 +1468,7 @@ fn write_vi_pairs_up_to_null<I: VariantIndex, H: BuildHasher>(
     let input_length = input.len();
     let input_bytes = input.as_bytes();
 
-    chunk[0].write((hash_string(input, hash_builder), index));
+    chunk[0].write(index.pack(hash_string(input, hash_builder)));
 
     let mut variant_idx = 1;
     scratch.reserve(input_length);
@@ -1441,16 +1489,16 @@ fn write_vi_pairs_up_to_null<I: VariantIndex, H: BuildHasher>(
             }
             scratch.extend_from_slice(&input_bytes[cursor..input_length]);
 
-            chunk[variant_idx].write((hash_string(&*scratch, hash_builder), index));
+            chunk[variant_idx].write(index.pack(hash_string(&*scratch, hash_builder)));
             variant_idx += 1;
         });
     }
 }
 
-fn hash_string(s: impl AsRef<[u8]>, hash_builder: &impl BuildHasher) -> u64 {
+fn hash_string(s: impl AsRef<[u8]>, hash_builder: &impl BuildHasher) -> u32 {
     let mut hasher = hash_builder.build_hasher();
     hasher.write(s.as_ref());
-    hasher.finish()
+    (hasher.finish() >> 32) as u32
 }
 
 fn prealloc_maybeuninit_vec<T>(total_capacity: usize) -> Vec<MaybeUninit<T>> {
@@ -1521,38 +1569,97 @@ fn get_disjoint_chunks_mut_cross<'a, T>(
 
 /// The runs of equal variant hashes in a sorted VIP slice.
 #[inline]
-fn groups<I: VariantIndex>(vip: &[(u64, I)]) -> impl Iterator<Item = &[(u64, I)]> {
-    vip.chunk_by(|(v1, _), (v2, _)| v1 == v2)
+fn groups(vip: &[u64]) -> impl Iterator<Item = &[u64]> {
+    vip.chunk_by(|a, b| a >> 32 == b >> 32)
 }
 
 /// Entries of one group with adjacent duplicates skipped, replacing the removed `Vec::dedup`.
 #[inline]
-fn distinct<I: VariantIndex>(group: &[(u64, I)]) -> impl Iterator<Item = I> + '_ {
-    group.chunk_by(|a, b| a.1 == b.1).map(|run| run[0].1)
+fn distinct(group: &[u64]) -> impl Iterator<Item = u64> + '_ {
+    group
+        .chunk_by(|a, b| *a as u32 == *b as u32)
+        .map(|run| run[0])
 }
 
-/// Cut a hash-sorted VIP slice into `target` contiguous chunks whose boundaries never fall inside
-/// a run of equal hashes, so each chunk can be grouped and deduplicated independently.
-fn group_aligned_bounds<I: VariantIndex>(vip: &[(u64, I)], target: usize) -> Vec<usize> {
-    debug_assert!(target > 0);
+const BUCKET_BITS: u32 = 8;
+const NUM_BUCKETS: usize = 1 << BUCKET_BITS;
+const BUCKET_SHIFT: u32 = u64::BITS - BUCKET_BITS;
 
-    let step = vip.len().div_ceil(target);
-    let mut bounds = vec![0];
-    let mut cut = step;
-
-    while cut < vip.len() {
-        let hash = vip[cut - 1].0;
-        // Sorted, so entries still equal to `hash` form a prefix of the remainder.
-        cut += vip[cut..].partition_point(|&(h, _)| h == hash);
-        if cut >= vip.len() {
-            break;
-        }
-        bounds.push(cut);
-        cut += step;
+/// Sort `vip` by scattering entries into buckets keyed on the top [`BUCKET_BITS`] of the hash,
+/// then sorting each bucket in parallel.
+///
+/// Produces the same order as `par_sort_unstable`, but every pass is parallel. Also returns the
+/// bucket boundaries: equal hashes share a bucket, so these never fall inside a hash group.
+fn bucket_sort(vip: Vec<u64>) -> (Vec<u64>, Vec<usize>) {
+    let n = vip.len();
+    if n == 0 {
+        return (vip, vec![0, 0]);
     }
 
-    bounds.push(vip.len());
-    bounds
+    let num_chunks = (rayon::current_num_threads() * 4).min(n);
+    let chunk_size = n.div_ceil(num_chunks);
+    let src_chunks: Vec<&[u64]> = vip.chunks(chunk_size).collect();
+
+    let histograms: Vec<[usize; NUM_BUCKETS]> = src_chunks
+        .par_iter()
+        .map(|chunk| {
+            let mut hist = [0usize; NUM_BUCKETS];
+            for &word in *chunk {
+                hist[(word >> BUCKET_SHIFT) as usize] += 1;
+            }
+            hist
+        })
+        .collect();
+
+    // Bucket-major destinations: for each bucket, consecutive slices for each source chunk.
+    // `bounds` marks the start of every bucket plus a final n.
+    let mut dest_uninit = prealloc_maybeuninit_vec::<u64>(n);
+    let mut dest_slices: Vec<Vec<&mut [MaybeUninit<u64>]>> = (0..src_chunks.len())
+        .map(|_| Vec::with_capacity(NUM_BUCKETS))
+        .collect();
+    let mut bounds = Vec::with_capacity(NUM_BUCKETS + 1);
+    bounds.push(0);
+
+    let mut bounds_cursor = 0;
+    let mut rest: &mut [MaybeUninit<u64>] = &mut dest_uninit[..];
+    for bucket in 0..NUM_BUCKETS {
+        for (chunk_i, hist) in histograms.iter().enumerate() {
+            let len = hist[bucket];
+            let (slice, next) = rest.split_at_mut(len);
+            dest_slices[chunk_i].push(slice);
+            rest = next;
+        }
+        let bucket_len: usize = histograms.iter().map(|h| h[bucket]).sum();
+        bounds_cursor += bucket_len;
+        bounds.push(bounds_cursor);
+    }
+    debug_assert!(rest.is_empty());
+
+    src_chunks
+        .par_iter()
+        .zip(dest_slices.into_par_iter())
+        .for_each(|(src, mut dests)| {
+            let mut cursors = [0usize; NUM_BUCKETS];
+            for &word in *src {
+                let b = (word >> BUCKET_SHIFT) as usize;
+                dests[b][cursors[b]].write(word);
+                cursors[b] += 1;
+            }
+            for b in 0..NUM_BUCKETS {
+                debug_assert_eq!(cursors[b], dests[b].len());
+            }
+        });
+
+    let mut sorted = unsafe { cast_to_initialised_vec(dest_uninit) };
+
+    let bucket_lens: Vec<usize> = bounds.windows(2).map(|w| w[1] - w[0]).collect();
+    let bucket_chunks = get_disjoint_chunks_mut(&bucket_lens, &mut sorted[..]);
+    bucket_chunks.into_par_iter().for_each(|bucket| {
+        // TODO: better to do radix sort here?
+        bucket.sort_unstable();
+    });
+
+    (sorted, bounds)
 }
 
 /// Sort the variant-index pairs, then collect the indices of every convergent group in parallel.
@@ -1560,13 +1667,10 @@ fn group_aligned_bounds<I: VariantIndex>(vip: &[(u64, I)], target: usize) -> Vec
 /// `describe` returns `(num_indices, payload)` for a kept group, or `None` to skip it. It sees the
 /// group with duplicates still present, so it must count through [`distinct`].
 fn collect_convergent_indices<I: VariantIndex, Payload: Copy + Send>(
-    mut variant_index_pairs: Vec<(u64, I)>,
-    describe: impl Fn(&[(u64, I)]) -> Option<(usize, Payload)> + Send + Sync,
+    variant_index_pairs: Vec<u64>,
+    describe: impl Fn(&[u64]) -> Option<(usize, Payload)> + Send + Sync,
 ) -> (Vec<u32>, Vec<Payload>) {
-    variant_index_pairs.par_sort_unstable();
-
-    let bounds =
-        group_aligned_bounds(&variant_index_pairs, rayon::current_num_threads() * 4);
+    let (variant_index_pairs, bounds) = bucket_sort(variant_index_pairs);
     let chunks: Vec<_> = bounds
         .windows(2)
         .map(|w| &variant_index_pairs[w[0]..w[1]])
@@ -1600,8 +1704,8 @@ fn collect_convergent_indices<I: VariantIndex, Payload: Copy + Send>(
                 let Some((_, payload)) = describe(group) else {
                     continue;
                 };
-                for entry in distinct(group) {
-                    out_indices[i].write(entry.raw_index());
+                for word in distinct(group) {
+                    out_indices[i].write(I::from_word(word).raw_index());
                     i += 1;
                 }
                 out_payloads[g].write(payload);
@@ -1618,7 +1722,6 @@ fn collect_convergent_indices<I: VariantIndex, Payload: Copy + Send>(
         )
     }
 }
-
 
 /// Given a contiguous slice of indices and a slice of sizes that demarcate chunks of indices that
 /// converge to the same deletion variant, return a vector of slices where each slice groups
@@ -1686,6 +1789,7 @@ fn get_hit_candidates_within(convergent_indices: &[impl AsRef<[u32]> + Sync]) ->
 
     let mut hit_candidates = unsafe { cast_to_initialised_vec(hit_candidates_uninit) };
 
+    // TODO: use new bucket-based parallel sorting here too? (and equivalent for _across variant)
     hit_candidates.par_sort_unstable();
     hit_candidates.dedup();
 
@@ -1785,62 +1889,159 @@ mod tests {
 
     // component tests
 
-    fn assert_group_aligned_bounds_ok(vip: &[(u64, u32)], target: usize) {
-        let bounds = group_aligned_bounds(vip, target);
+    fn pack(hash: u32, idx: u32) -> u64 {
+        idx.pack(hash)
+    }
+
+    fn pack_ci(hash: u32, ci: CrossIndex) -> u64 {
+        ci.pack(hash)
+    }
+
+    fn assert_bucket_bounds_ok(vip: &[u64], bounds: &[usize]) {
         assert_eq!(*bounds.first().unwrap(), 0);
         assert_eq!(*bounds.last().unwrap(), vip.len());
         for window in bounds.windows(2) {
-            assert!(window[0] < window[1] || (vip.is_empty() && window[0] == window[1]));
+            assert!(window[0] <= window[1]);
         }
         for &b in &bounds[1..bounds.len().saturating_sub(1)] {
-            assert_ne!(vip[b - 1].0, vip[b].0, "boundary {b} splits a hash group");
+            if b == 0 || b >= vip.len() {
+                continue;
+            }
+            assert_ne!(
+                vip[b - 1] >> 32,
+                vip[b] >> 32,
+                "boundary {b} splits a hash group"
+            );
         }
     }
 
     #[test]
-    fn test_group_aligned_bounds_never_splits_groups() {
-        // Empty slice.
-        assert_eq!(group_aligned_bounds::<u32>(&[], 4), vec![0, 0]);
+    fn test_bucket_sort_matches_par_sort() {
+        let assert_matches = |vip: Vec<u64>| {
+            let mut expected = vip.clone();
+            expected.par_sort_unstable();
+            let (got, bounds) = bucket_sort(vip.clone());
+            assert_eq!(got, expected);
+            assert_bucket_bounds_ok(&got, &bounds);
+        };
 
-        // target == 1 → single chunk.
-        let vip = [(1u64, 0u32), (1, 1), (2, 2), (3, 3)];
-        assert_eq!(group_aligned_bounds(&vip, 1), vec![0, 4]);
+        assert_matches(vec![]);
+        assert_matches(vec![pack(1, 0)]);
+        assert_matches((0..50).map(|i| pack(42, i)).collect());
+        assert_matches(vec![pack(0, 0), pack(0, 1), pack(0, 2)]);
+        assert_matches(vec![
+            pack(0, 0),
+            pack(0, 1),
+            pack(u32::MAX, 2),
+            pack(u32::MAX, 3),
+        ]);
+        assert_matches(vec![
+            pack(1, 0),
+            pack(1, 0),
+            pack(1, 1),
+            pack(2, 2),
+            pack(2, 2),
+        ]);
 
-        // len < target → step == 1, still never splits equal-hash runs.
-        let vip = [(1u64, 0u32), (1, 1), (1, 2), (2, 3), (3, 4), (3, 5), (4, 6)];
-        assert_group_aligned_bounds_ok(&vip, 16);
+        // Only bucket 0 and only bucket 255.
+        assert_matches(vec![pack(0x00_12_34_56, 0), pack(0x00_ab_cd_ef, 1)]);
+        assert_matches(vec![pack(0xff_12_34_56, 0), pack(0xff_ab_cd_ef, 1)]);
 
-        // One hash run longer than a nominal chunk.
-        let mut vip = Vec::new();
-        for i in 0..20u32 {
-            vip.push((1u64, i));
+        // Pseudorandom via inline xorshift (no rand dependency).
+        let mut state = 0x1234_5678_u64;
+        let mut vip = Vec::with_capacity(200);
+        for i in 0..200u32 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            vip.push(pack((state >> 32) as u32, i));
         }
-        for i in 0..10u32 {
-            vip.push((2u64, i));
-        }
-        for i in 0..5u32 {
-            vip.push((3u64, i));
-        }
-        assert_group_aligned_bounds_ok(&vip, 8);
+        assert_matches(vip);
 
-        // Entire slice is one single group.
-        let vip: Vec<(u64, u32)> = (0..50).map(|i| (42u64, i)).collect();
-        let bounds = group_aligned_bounds(&vip, 8);
-        assert_eq!(bounds, vec![0, 50]);
+        // CrossIndex flavour: type bit in the low half must survive the sort order.
+        let q = |i| CrossIndex::from(i, false);
+        let r = |i| CrossIndex::from(i, true);
+        let vip = vec![
+            pack_ci(5, r(1)),
+            pack_ci(5, q(3)),
+            pack_ci(5, q(1)),
+            pack_ci(1, r(0)),
+            pack_ci(1, q(0)),
+        ];
+        let mut expected = vip.clone();
+        expected.par_sort_unstable();
+        let (got, _) = bucket_sort(vip);
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn test_bucket_bounds_never_split_a_hash_group() {
+        let cases: Vec<Vec<u64>> = vec![
+            vec![],
+            vec![pack(1, 0)],
+            (0..50).map(|i| pack(42, i)).collect(),
+            {
+                let mut vip = Vec::new();
+                for i in 0..20u32 {
+                    vip.push(pack(1, i));
+                }
+                for i in 0..10u32 {
+                    vip.push(pack(2, i));
+                }
+                for i in 0..5u32 {
+                    vip.push(pack(3, i));
+                }
+                vip
+            },
+        ];
+        for vip in cases {
+            let (sorted, bounds) = bucket_sort(vip);
+            assert_bucket_bounds_ok(&sorted, &bounds);
+            if !sorted.is_empty() {
+                assert_eq!(bounds.len(), NUM_BUCKETS + 1);
+            }
+        }
+    }
+
+    #[test]
+    fn test_bucket_sort_orders_query_before_reference() {
+        let q = |i| CrossIndex::from(i, false);
+        let r = |i| CrossIndex::from(i, true);
+        let vip = vec![
+            pack_ci(7, r(2)),
+            pack_ci(7, q(5)),
+            pack_ci(7, r(1)),
+            pack_ci(7, q(0)),
+            pack_ci(3, r(0)),
+            pack_ci(3, q(1)),
+        ];
+        let (sorted, _) = bucket_sort(vip);
+
+        for group in groups(&sorted) {
+            let mut seen_ref = false;
+            for word in distinct(group) {
+                let ci = CrossIndex::from_word(word);
+                if ci.is_ref() {
+                    seen_ref = true;
+                } else {
+                    assert!(!seen_ref, "query index after reference within a hash group");
+                }
+            }
+        }
     }
 
     #[test]
     fn test_collect_convergent_indices() {
-        let within = |vip: Vec<(u64, u32)>| {
-            collect_convergent_indices(vip, |group| {
+        let within = |vip: Vec<u64>| {
+            collect_convergent_indices::<u32, _>(vip, |group| {
                 let len = distinct(group).count();
                 (len > 1).then_some((len, len))
             })
         };
-        let cross = |vip: Vec<(u64, CrossIndex)>| {
-            collect_convergent_indices(vip, |group| {
-                let (len_q, len_r) = distinct(group).fold((0, 0), |(q, r), ci| {
-                    if ci.is_ref() {
+        let cross = |vip: Vec<u64>| {
+            collect_convergent_indices::<CrossIndex, _>(vip, |group| {
+                let (len_q, len_r) = distinct(group).fold((0, 0), |(q, r), word| {
+                    if CrossIndex::from_word(word).is_ref() {
                         (q, r + 1)
                     } else {
                         (q + 1, r)
@@ -1851,24 +2052,36 @@ mod tests {
         };
 
         // Singletons dropped; one multi-index group kept; duplicates collapsed.
-        assert_eq!(within(vec![(1, 0), (2, 1), (3, 2)]), (vec![], vec![]));
-        assert_eq!(within(vec![(1, 0), (1, 1), (1, 2)]), (vec![0, 1, 2], vec![3]));
+        assert_eq!(
+            within(vec![pack(1, 0), pack(2, 1), pack(3, 2)]),
+            (vec![], vec![])
+        );
+        assert_eq!(
+            within(vec![pack(1, 0), pack(1, 1), pack(1, 2)]),
+            (vec![0, 1, 2], vec![3])
+        );
         assert_eq!(
             within(vec![
-                (1, 0),
-                (1, 0),
-                (1, 1),
-                (2, 2),
-                (3, 3),
-                (3, 4),
-                (3, 4),
-                (4, 5),
+                pack(1, 0),
+                pack(1, 0),
+                pack(1, 1),
+                pack(2, 2),
+                pack(3, 3),
+                pack(3, 4),
+                pack(3, 4),
+                pack(4, 5),
             ]),
             (vec![0, 1, 3, 4], vec![2, 2])
         );
         // Unsorted input is sorted first.
         assert_eq!(
-            within(vec![(3, 1), (1, 0), (3, 0), (2, 2), (1, 1)]),
+            within(vec![
+                pack(3, 1),
+                pack(1, 0),
+                pack(3, 0),
+                pack(2, 2),
+                pack(1, 1)
+            ]),
             (vec![0, 1, 0, 1], vec![2, 2])
         );
         assert_eq!(within(vec![]), (vec![], vec![]));
@@ -1876,17 +2089,23 @@ mod tests {
         // Same-side-only groups dropped; cross group keeps query then ref indices.
         let q = |i| CrossIndex::from(i, false);
         let r = |i| CrossIndex::from(i, true);
-        assert_eq!(cross(vec![(1, q(0)), (1, q(1))]), (vec![], vec![]));
-        assert_eq!(cross(vec![(1, r(0)), (1, r(1))]), (vec![], vec![]));
+        assert_eq!(
+            cross(vec![pack_ci(1, q(0)), pack_ci(1, q(1))]),
+            (vec![], vec![])
+        );
+        assert_eq!(
+            cross(vec![pack_ci(1, r(0)), pack_ci(1, r(1))]),
+            (vec![], vec![])
+        );
         assert_eq!(
             cross(vec![
-                (1, q(0)),
-                (1, q(0)),
-                (1, q(1)),
-                (1, r(0)),
-                (1, r(2)),
-                (1, r(2)),
-                (2, q(3)),
+                pack_ci(1, q(0)),
+                pack_ci(1, q(0)),
+                pack_ci(1, q(1)),
+                pack_ci(1, r(0)),
+                pack_ci(1, r(2)),
+                pack_ci(1, r(2)),
+                pack_ci(2, q(3)),
             ]),
             (vec![0, 1, 0, 2], vec![(2, 2)])
         );
@@ -1945,8 +2164,8 @@ mod tests {
 
         let pairs = unsafe { cast_to_initialised_vec(chunk) };
         let expected = hash_string([u8::MAX, u8::MAX], &hash_builder);
-        assert_eq!(pairs[0].0, expected);
-        assert_eq!(pairs[0].1, 0);
+        assert_eq!((pairs[0] >> 32) as u32, expected);
+        assert_eq!(pairs[0] as u32, 0);
     }
 
     #[test]
