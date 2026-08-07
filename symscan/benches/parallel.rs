@@ -2,34 +2,23 @@ use criterion::{
     criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode, Throughput,
 };
 use rayon::ThreadPoolBuilder;
-use std::env;
 use std::fs::File;
 use std::hint::black_box;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::time::Duration;
-use symscan::get_neighbors_across;
+use symscan::{get_neighbors_across, CachedRef};
 
-fn default_n() -> usize {
-    200_000
-}
-
-fn bench_n() -> usize {
-    env::var("SYMSCAN_BENCH_N")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(default_n)
-}
+const NUM_STRINGS: usize = 1_000_000;
 
 fn test_files_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../test_files")
 }
 
-fn load_lines(path: PathBuf, n: usize) -> Vec<String> {
+fn load_lines(path: PathBuf) -> Vec<String> {
     let file = File::open(&path).unwrap_or_else(|e| panic!("failed to open {}: {e}", path.display()));
     BufReader::new(file)
         .lines()
-        .take(n)
         .collect::<Result<Vec<_>, _>>()
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
 }
@@ -55,17 +44,25 @@ fn thread_counts() -> Vec<usize> {
     counts
 }
 
-fn setup_parallel_benchmarks(c: &mut Criterion) {
-    let n = bench_n();
+fn load_inputs() -> (Vec<String>, Vec<String>) {
     let dir = test_files_dir();
-    let query = load_lines(dir.join("cdr3b_1m_a.txt"), n);
-    let reference = load_lines(dir.join("cdr3b_1m_b.txt"), n);
-    assert_eq!(query.len(), n, "expected {n} query lines");
-    assert_eq!(reference.len(), n, "expected {n} reference lines");
+    let query = load_lines(dir.join("cdr3b_1m_a.txt"));
+    let reference = load_lines(dir.join("cdr3b_1m_b.txt"));
+    assert_eq!(query.len(), NUM_STRINGS, "expected {NUM_STRINGS} query lines");
+    assert_eq!(
+        reference.len(),
+        NUM_STRINGS,
+        "expected {NUM_STRINGS} reference lines"
+    );
+    (query, reference)
+}
 
-    let mut group = c.benchmark_group(format!("parallel_across_{n}"));
+fn setup_parallel_across(c: &mut Criterion) {
+    let (query, reference) = load_inputs();
+
+    let mut group = c.benchmark_group("parallel_across");
     group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Throughput::Elements(n as u64));
+    group.throughput(Throughput::Elements(NUM_STRINGS as u64));
 
     for threads in thread_counts() {
         let pool = ThreadPoolBuilder::new()
@@ -85,9 +82,58 @@ fn setup_parallel_benchmarks(c: &mut Criterion) {
     group.finish();
 }
 
+fn setup_parallel_cached_new(c: &mut Criterion) {
+    let (_, reference) = load_inputs();
+
+    let mut group = c.benchmark_group("parallel_cached_new");
+    group.sampling_mode(SamplingMode::Flat);
+    group.throughput(Throughput::Elements(NUM_STRINGS as u64));
+
+    for threads in thread_counts() {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap_or_else(|e| panic!("failed to build rayon pool with {threads} threads: {e}"));
+
+        group.bench_with_input(BenchmarkId::from_parameter(threads), &threads, |b, _| {
+            b.iter(|| {
+                pool.install(|| black_box(CachedRef::new(&reference, 1).expect("bench input ok")))
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn setup_parallel_cached_across(c: &mut Criterion) {
+    let (query, reference) = load_inputs();
+    let cached = CachedRef::new(&reference, 1).expect("bench input ok");
+
+    let mut group = c.benchmark_group("parallel_cached_across");
+    group.sampling_mode(SamplingMode::Flat);
+    group.throughput(Throughput::Elements(NUM_STRINGS as u64));
+
+    for threads in thread_counts() {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap_or_else(|e| panic!("failed to build rayon pool with {threads} threads: {e}"));
+
+        group.bench_with_input(BenchmarkId::from_parameter(threads), &threads, |b, _| {
+            b.iter(|| {
+                pool.install(|| {
+                    black_box(cached.get_neighbors_across(&query, 1).expect("bench input ok"))
+                })
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = configure_criterion();
-    targets = setup_parallel_benchmarks
+    targets = setup_parallel_across, setup_parallel_cached_new, setup_parallel_cached_across
 }
 criterion_main!(benches);
