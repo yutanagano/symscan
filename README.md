@@ -1,5 +1,10 @@
 # SymScan
 
+[![Crates.io](https://img.shields.io/crates/v/symscan.svg)](https://crates.io/crates/symscan)
+[![PyPI](https://img.shields.io/pypi/v/symscan.svg)](https://pypi.org/project/symscan/)
+[![Docs](https://readthedocs.org/projects/symscan/badge/?version=latest)](https://symscan.readthedocs.io)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#licensing)
+
 ### Check out the [documentation page](https://symscan.readthedocs.io).
 
 **SymScan** enables extremely fast discovery of pairs of similar strings within
@@ -26,6 +31,14 @@ faster for the above use case.
 brew install yutanagano/tap/symscan-cli
 ```
 
+Or install from source:
+
+```sh
+git clone https://github.com/yutanagano/symscan.git
+cd symscan
+cargo install --path symscan-cli
+```
+
 ### Rust library
 
 ```sh
@@ -37,6 +50,57 @@ cargo add symscan
 ```sh
 pip install symscan
 ```
+
+## Quick start
+
+### CLI
+
+SymScan takes in a list of strings (one per line) via stdin, and returns which
+ones are within one Levenshtein edit (the default) of each other. Each output
+line is `<line 1>,<line 2>,<edit distance>` (1-indexed):
+
+```sh
+$ echo $'fizz\nfuzz\nbuzz\nfizzy' | symscan
+1,2,1
+1,4,1
+2,3,1
+```
+
+See the [CLI docs](https://symscan.readthedocs.io/en/latest/cli.html) for
+options like `-d` (max distance), `-z` (0-indexed output), `--hamming`, and
+searching across two files.
+
+### Rust
+
+```rust
+use symscan::{get_neighbors_within, NeighborPairs};
+
+let query = ["fizz", "fuzz", "buzz", "fizzy"];
+let NeighborPairs { row, col, dists } = get_neighbors_within(&query, 1).unwrap();
+
+assert_eq!(row,   vec![0, 0, 1]);
+assert_eq!(col,   vec![1, 3, 2]);
+assert_eq!(dists, vec![1, 1, 1]);
+```
+
+See the [crate docs](https://docs.rs/symscan/latest/symscan/) for
+searching across two collections and the memoized `CachedRef` API.
+
+### Python
+
+```python
+>>> import symscan
+>>> row, col, dists = symscan.get_neighbors_within(["fizz", "fuzz", "buzz", "fizzy"])
+>>> row
+array([0, 0, 1], dtype=uint32)
+>>> col
+array([1, 3, 2], dtype=uint32)
+>>> dists
+array([1, 1, 1], dtype=uint8)
+```
+
+See the [Python docs](https://symscan.readthedocs.io/en/latest/py.html)
+for searching across two collections and the memoized `CachedRef` API.
 
 ## Licensing
 
