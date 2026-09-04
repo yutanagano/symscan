@@ -107,9 +107,14 @@ impl<T: Clone + Default> Matrix<T> for SymmetricMatrix<T> {}
 pub fn compute_overlap_matrix_within(
     data: &AirrData,
     max_distance: u8,
+    hamming: bool,
 ) -> Result<SymmetricMatrix<u64>, symscan::Error> {
-    let neighbor_pairs =
-        symscan::get_neighbors_within(data.interned_junctions.uniques(), max_distance)?;
+    let neighbor_pairs = match hamming {
+        true => {
+            symscan::get_hamming_neighbors_within(data.interned_junctions.uniques(), max_distance)
+        }
+        false => symscan::get_neighbors_within(data.interned_junctions.uniques(), max_distance),
+    }?;
 
     let mut ovl_mat = SymmetricMatrix::new(data.interned_repertoires.len());
 
@@ -155,12 +160,20 @@ pub fn compute_overlap_matrix_across(
     data_query: &AirrData,
     data_ref: &AirrData,
     max_distance: u8,
+    hamming: bool,
 ) -> Result<DenseMatrix<u64>, symscan::Error> {
-    let neighbor_pairs = symscan::get_neighbors_across(
-        data_query.interned_junctions.uniques(),
-        data_ref.interned_junctions.uniques(),
-        max_distance,
-    )?;
+    let neighbor_pairs = match hamming {
+        true => symscan::get_hamming_neighbors_across(
+            data_query.interned_junctions.uniques(),
+            data_ref.interned_junctions.uniques(),
+            max_distance,
+        ),
+        false => symscan::get_neighbors_across(
+            data_query.interned_junctions.uniques(),
+            data_ref.interned_junctions.uniques(),
+            max_distance,
+        ),
+    }?;
 
     let mut ovl_mat = DenseMatrix::new(
         data_query.interned_repertoires.len(),
@@ -191,8 +204,8 @@ mod tests {
     #[test]
     fn test_compute_overlap_matrix() {
         let parsed = parsing::parse_airr_tsv(MOCK_AIRR_TSV).expect("should parse valid tsv");
-        let ovl_mat =
-            compute_overlap_matrix_within(&parsed, 2).expect("should not be any symscan errors");
+        let ovl_mat = compute_overlap_matrix_within(&parsed, 2, false)
+            .expect("should not be any symscan errors");
 
         assert_eq!(ovl_mat.vals, vec![10, 8, 14]);
     }

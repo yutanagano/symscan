@@ -5,9 +5,11 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter};
 use std::process;
 
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use rayon::ThreadPoolBuilder;
 use thiserror::Error;
+
+use crate::parsing::AirrData;
 
 mod analysis;
 mod parsing;
@@ -55,6 +57,10 @@ struct Args {
     #[arg(short = 'd', long, default_value_t = 1)]
     max_distance: u8,
 
+    /// Limit the neighbour search to only consider substitutions (i.e. use Hamming distance).
+    #[arg(long, action = ArgAction::SetTrue)]
+    hamming: bool,
+
     /// The number of OS threads the program spawns for computations (if 0 spawns one thread per CPU core).
     #[arg(short, long, default_value_t = 0)]
     num_threads: usize,
@@ -76,41 +82,11 @@ fn main() -> Result<(), Error> {
         .num_threads(args.num_threads)
         .build_global()?;
 
-    if let Some(ref_path) = args.file_reference {
-        let query_path = args
-            .file_query
-            .expect("the query file must be specified if the ref file is specified");
-        let query_reader = get_file_bufreader(&query_path);
-        let query_data = parsing::parse_airr_tsv(query_reader).map_err(|e| Error::Parsing {
-            input_name: query_path,
-            error: e,
-        })?;
-
-        let ref_reader = get_file_bufreader(&ref_path);
-        let ref_data = parsing::parse_airr_tsv(ref_reader).map_err(|e| Error::Parsing {
-            input_name: ref_path,
-            error: e,
-        })?;
-
-        let overlap_matrix =
-            analysis::compute_overlap_matrix_across(&query_data, &ref_data, args.max_distance)?;
-
-        let mut writer = BufWriter::new(io::stdout().lock());
-        serialization::om_as_triplet_tsv_full(
-            &overlap_matrix,
-            &query_data,
-            &ref_data,
-            &mut writer,
-        )?;
-
-        return Ok(());
-    }
-
-    let parsed = match args.file_query {
+    let data_query = match args.file_query.as_ref() {
         Some(path) => {
-            let reader = get_file_bufreader(&path);
+            let reader = get_file_bufreader(path);
             parsing::parse_airr_tsv(reader).map_err(|e| Error::Parsing {
-                input_name: path,
+                input_name: path.to_string(),
                 error: e,
             })?
         }
@@ -123,10 +99,50 @@ fn main() -> Result<(), Error> {
         }
     };
 
-    let overlap_matrix = analysis::compute_overlap_matrix_within(&parsed, args.max_distance)?;
+    if let Some(ref_path) = &args.file_reference {
+        if ref_path
+            != args
+                .file_query
+                .as_ref()
+                .expect("query file must be specified if reference file is specified")
+        {
+            let ref_reader = get_file_bufreader(ref_path);
+            let data_ref = parsing::parse_airr_tsv(ref_reader).map_err(|e| Error::Parsing {
+                input_name: ref_path.to_string(),
+                error: e,
+            })?;
+
+            return run_analysis_across(&data_query, &data_ref, &args);
+        }
+    };
+
+    run_analysis_within(&data_query, &args)
+}
+
+fn run_analysis_within(data: &AirrData, args: &Args) -> Result<(), Error> {
+    let overlap_matrix =
+        analysis::compute_overlap_matrix_within(data, args.max_distance, args.hamming)?;
 
     let mut writer = BufWriter::new(io::stdout().lock());
-    serialization::om_as_triplet_tsv_upper(&overlap_matrix, &parsed, &mut writer)?;
+    serialization::om_as_triplet_tsv_upper(&overlap_matrix, data, &mut writer)?;
+
+    Ok(())
+}
+
+fn run_analysis_across(
+    data_query: &AirrData,
+    data_ref: &AirrData,
+    args: &Args,
+) -> Result<(), Error> {
+    let overlap_matrix = analysis::compute_overlap_matrix_across(
+        data_query,
+        data_ref,
+        args.max_distance,
+        args.hamming,
+    )?;
+
+    let mut writer = BufWriter::new(io::stdout().lock());
+    serialization::om_as_triplet_tsv_full(&overlap_matrix, data_query, data_ref, &mut writer)?;
 
     Ok(())
 }
