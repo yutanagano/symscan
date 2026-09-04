@@ -15,24 +15,6 @@ mod analysis;
 mod parsing;
 mod serialization;
 
-#[derive(Debug, Error)]
-enum Error {
-    #[error(transparent)]
-    ThreadPool(#[from] rayon::ThreadPoolBuildError),
-
-    #[error("while parsing from {input_name}, got the following error:\n{error}")]
-    Parsing {
-        input_name: String,
-        error: parsing::Error,
-    },
-
-    #[error(transparent)]
-    Processing(#[from] symscan::Error),
-
-    #[error(transparent)]
-    Io(#[from] io::Error),
-}
-
 /// CLI tool for fast comparison between different adaptive immune receptor repertoires (AIRRs),
 /// powered by the symscan algorithm.
 ///
@@ -61,6 +43,12 @@ struct Args {
     #[arg(long, action = ArgAction::SetTrue)]
     hamming: bool,
 
+    /// Use the amino acid sequence from the cdr3_aa column.
+    ///
+    /// By default, the program uses the junction_aa column.
+    #[arg(long, action = ArgAction::SetTrue)]
+    cdr3: bool,
+
     /// The number of OS threads the program spawns for computations (if 0 spawns one thread per CPU core).
     #[arg(short, long, default_value_t = 0)]
     num_threads: usize,
@@ -75,6 +63,24 @@ struct Args {
     file_reference: Option<String>,
 }
 
+#[derive(Debug, Error)]
+enum Error {
+    #[error(transparent)]
+    ThreadPool(#[from] rayon::ThreadPoolBuildError),
+
+    #[error("while parsing from {input_name}, got the following error:\n{error}")]
+    Parsing {
+        input_name: String,
+        error: parsing::Error,
+    },
+
+    #[error(transparent)]
+    Processing(#[from] symscan::Error),
+
+    #[error(transparent)]
+    Io(#[from] io::Error),
+}
+
 fn main() -> Result<(), Error> {
     let args = Args::parse();
 
@@ -85,14 +91,14 @@ fn main() -> Result<(), Error> {
     let data_query = match args.file_query.as_ref() {
         Some(path) => {
             let reader = get_file_bufreader(path);
-            parsing::parse_airr_tsv(reader).map_err(|e| Error::Parsing {
+            parsing::parse_airr_tsv(reader, args.cdr3).map_err(|e| Error::Parsing {
                 input_name: path.to_string(),
                 error: e,
             })?
         }
         None => {
             let stdin = io::stdin().lock();
-            parsing::parse_airr_tsv(stdin).map_err(|e| Error::Parsing {
+            parsing::parse_airr_tsv(stdin, args.cdr3).map_err(|e| Error::Parsing {
                 input_name: "stdin".to_string(),
                 error: e,
             })?
@@ -107,10 +113,11 @@ fn main() -> Result<(), Error> {
                 .expect("query file must be specified if reference file is specified")
         {
             let ref_reader = get_file_bufreader(ref_path);
-            let data_ref = parsing::parse_airr_tsv(ref_reader).map_err(|e| Error::Parsing {
-                input_name: ref_path.to_string(),
-                error: e,
-            })?;
+            let data_ref =
+                parsing::parse_airr_tsv(ref_reader, args.cdr3).map_err(|e| Error::Parsing {
+                    input_name: ref_path.to_string(),
+                    error: e,
+                })?;
 
             return run_analysis_across(&data_query, &data_ref, &args);
         }

@@ -154,18 +154,19 @@ struct ColIndices {
     dpct: usize,
 }
 
-impl<R: Read> TryFrom<&mut Reader<R>> for ColIndices {
-    type Error = Error;
-
-    fn try_from(value: &mut Reader<R>) -> Result<Self, Self::Error> {
-        let headers = value.headers().map_err(Error::InvalidCsv)?;
+impl ColIndices {
+    fn try_from(tsv: &mut Reader<impl Read>, use_cdr3_col: bool) -> Result<Self, Error> {
+        let headers = tsv.headers().map_err(Error::InvalidCsv)?;
         let get_col_index = |colname: &str| {
             headers
                 .iter()
                 .position(|h| h == colname)
                 .ok_or(Error::MissingColumn(colname.to_string()))
         };
-        let jctn = get_col_index("junction_aa")?;
+        let jctn = match use_cdr3_col {
+            true => get_col_index("cdr3_aa"),
+            false => get_col_index("junction_aa"),
+        }?;
         let rprt = get_col_index("repertoire_id")?;
         let dpct = get_col_index("duplicate_count")?;
 
@@ -188,14 +189,14 @@ impl<R: Read> TryFrom<&mut Reader<R>> for ColIndices {
 /// duplicate-count matrix. The shape of the duplicate-count matrix should be n_unique_AIRs x n_reps
 /// (i.e. every row corresponds to a unique AIR sequence). Each row contains data representing the
 /// duplicate count of a unique sequence in each of the input repertoires.
-pub fn parse_airr_tsv(in_stream: impl BufRead) -> Result<AirrData, Error> {
+pub fn parse_airr_tsv(in_stream: impl BufRead, use_cdr3_col: bool) -> Result<AirrData, Error> {
     let mut reader = ReaderBuilder::new().delimiter(b'\t').from_reader(in_stream);
 
     let mut interned_junctions = InternedStrings::new();
     let mut interned_repertoires = InternedStrings::new();
     let mut dup_count_coo: HashMap<PackedSeqId, u32> = HashMap::new();
 
-    let col_indices = ColIndices::try_from(&mut reader)?;
+    let col_indices = ColIndices::try_from(&mut reader, use_cdr3_col)?;
     let mut record = StringRecord::new();
     while reader.read_record(&mut record).map_err(Error::InvalidCsv)? {
         // If for any record the junction, repertoire, or duplicate count are missing, skip the
@@ -266,15 +267,25 @@ mod tests {
         let mut reader = ReaderBuilder::new()
             .delimiter(b'\t')
             .from_reader(MOCK_AIRR_TSV);
-        let col_indices = ColIndices::try_from(&mut reader).unwrap();
+        let col_indices = ColIndices::try_from(&mut reader, false).unwrap();
 
         assert_eq!(col_indices.jctn, 0);
         assert_eq!(col_indices.rprt, 2);
     }
 
     #[test]
+    fn test_use_cdr3_col() {
+        let mut reader = ReaderBuilder::new()
+            .delimiter(b'\t')
+            .from_reader(MOCK_AIRR_TSV);
+        let result = ColIndices::try_from(&mut reader, true);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_parse_tsv() {
-        let parsed = parse_airr_tsv(MOCK_AIRR_TSV).expect("should parse valid tsv");
+        let parsed = parse_airr_tsv(MOCK_AIRR_TSV, false).expect("should parse valid tsv");
 
         assert_eq!(parsed.interned_junctions.len(), 9);
         assert_eq!(parsed.interned_repertoires.len(), 2);
