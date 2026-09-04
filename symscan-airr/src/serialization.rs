@@ -1,14 +1,53 @@
-use std::io::{Result, Write};
+use std::io::{self, Write};
 
 use itertools::Itertools;
 
-use crate::{analysis::SymmetricMatrix, parsing::AirrData};
+use crate::{
+    analysis::{Matrix, SymmetricMatrix},
+    parsing::AirrData,
+};
 
-pub fn write_overlap_matrix_as_tsv(
+/// Serialize a matrix in triplet tsv format, where every index is explicitly specified as a row.
+///
+/// This will lead to rows with duplicate information if the underlying overlap matrix is
+/// symmetrical.
+pub fn om_as_triplet_tsv_full(
+    overlap_matrix: &impl Matrix<u64>,
+    context_query: &AirrData,
+    context_ref: &AirrData,
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    let mut repnames_query = context_query.interned_repertoires.uniques().to_vec();
+    let mut repnames_ref = context_ref.interned_repertoires.uniques().to_vec();
+    repnames_query.sort_unstable();
+    repnames_ref.sort_unstable();
+
+    for (repname_q, repname_r) in repnames_query.iter().cartesian_product(repnames_ref.iter()) {
+        let repid_q = context_query
+            .interned_repertoires
+            .get_id(repname_q)
+            .expect("valid repname should have id");
+        let repid_r = context_ref
+            .interned_repertoires
+            .get_id(repname_r)
+            .expect("valid repname should have id");
+        let overlap = overlap_matrix[(repid_q as usize, repid_r as usize)];
+
+        writeln!(writer, "{repname_q}\t{repname_r}\t{overlap}")?;
+    }
+
+    Ok(())
+}
+
+/// Serialize a matrix in triplet tsv format, where only the upper triangle and diagonal are
+/// explicitly specified.
+///
+/// This is only available for symmetric matrices.
+pub fn om_as_triplet_tsv_upper(
     overlap_matrix: &SymmetricMatrix<u64>,
     context: &AirrData,
     writer: &mut impl Write,
-) -> Result<()> {
+) -> io::Result<()> {
     let mut repertoire_names = context.interned_repertoires.uniques().to_vec();
     repertoire_names.sort_unstable();
 
@@ -25,7 +64,7 @@ pub fn write_overlap_matrix_as_tsv(
             .interned_repertoires
             .get_id(repname_2)
             .expect("valid repname should have id");
-        let overlap = overlap_matrix.get(repid_1 as usize, repid_2 as usize);
+        let overlap = overlap_matrix[(repid_1 as usize, repid_2 as usize)];
 
         writeln!(writer, "{repname_1}\t{repname_2}\t{overlap}")?;
     }
@@ -41,12 +80,12 @@ mod tests {
     static MOCK_AIRR_TSV: &[u8] = include_bytes!("../../test_files/mock_airr.tsv");
 
     #[test]
-    fn test_write_overlap_matrix_as_tsv() {
+    fn test_om_as_triplet_tsv_ut() {
         let parsed = parsing::parse_airr_tsv(MOCK_AIRR_TSV).expect("should parse valid tsv");
-        let ovl_mat =
-            analysis::compute_overlap_matrix(&parsed).expect("should not be any symscan errors");
+        let ovl_mat = analysis::compute_overlap_matrix_within(&parsed, 2)
+            .expect("should not be any symscan errors");
         let mut output = Vec::new();
-        write_overlap_matrix_as_tsv(&ovl_mat, &parsed, &mut output).expect("write should not fail");
+        om_as_triplet_tsv_upper(&ovl_mat, &parsed, &mut output).expect("write should not fail");
 
         let expected = "a\ta\t10\na\tb\t8\nb\tb\t14\n";
 
