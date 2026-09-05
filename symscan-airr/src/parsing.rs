@@ -192,28 +192,35 @@ pub struct DupCountEntry {
 }
 
 struct ColIndices {
-    jctn: usize,
-    rprt: usize,
-    dpct: usize,
+    junction: usize,
+    repertoire: usize,
+    duplicate_count: usize,
 }
 
 impl ColIndices {
-    fn try_from(tsv: &mut Reader<impl Read>, use_cdr3_col: bool) -> Result<Self, Error> {
+    fn try_from(
+        tsv: &mut Reader<impl Read>,
+        custom_junction_col: Option<&str>,
+        custom_count_col: Option<&str>,
+        custom_repertoire_col: Option<&str>,
+    ) -> Result<Self, Error> {
         let headers = tsv.headers().map_err(Error::InvalidCsv)?;
+
         let get_col_index = |colname: &str| {
             headers
                 .iter()
                 .position(|h| h == colname)
                 .ok_or(Error::MissingColumn(colname.to_string()))
         };
-        let jctn = match use_cdr3_col {
-            true => get_col_index("cdr3_aa"),
-            false => get_col_index("junction_aa"),
-        }?;
-        let rprt = get_col_index("repertoire_id")?;
-        let dpct = get_col_index("duplicate_count")?;
+        let jctn = get_col_index(custom_junction_col.unwrap_or("junction_aa"))?;
+        let dpct = get_col_index(custom_count_col.unwrap_or("duplicate_count"))?;
+        let rprt = get_col_index(custom_repertoire_col.unwrap_or("repertoire_id"))?;
 
-        Ok(Self { jctn, rprt, dpct })
+        Ok(Self {
+            junction: jctn,
+            repertoire: rprt,
+            duplicate_count: dpct,
+        })
     }
 }
 
@@ -234,8 +241,10 @@ impl ColIndices {
 /// duplicate count of a unique sequence in each of the input repertoires.
 pub fn parse_airr_tsv(
     in_stream: impl BufRead,
-    use_cdr3_col: bool,
     num_rows_hint: Option<u32>,
+    custom_junction_col: Option<&str>,
+    custom_count_col: Option<&str>,
+    custom_repertoire_col: Option<&str>,
 ) -> Result<AirrData, Error> {
     let mut tsv_reader = ReaderBuilder::new().delimiter(b'\t').from_reader(in_stream);
 
@@ -244,7 +253,12 @@ pub fn parse_airr_tsv(
     let mut interned_repertoires = InternedStrings::with_capacity(0);
     let mut dup_count_coo: HashMap<PackedSeqId, u32> = HashMap::with_capacity(size_hint);
 
-    let col_indices = ColIndices::try_from(&mut tsv_reader, use_cdr3_col)?;
+    let col_indices = ColIndices::try_from(
+        &mut tsv_reader,
+        custom_junction_col,
+        custom_count_col,
+        custom_repertoire_col,
+    )?;
     let mut record = ByteRecord::new();
     while tsv_reader
         .read_byte_record(&mut record)
@@ -254,7 +268,7 @@ pub fn parse_airr_tsv(
         // record since we don't have enough information.
 
         let junction = record
-            .get(col_indices.jctn)
+            .get(col_indices.junction)
             .expect("idx should not be out of range");
         if junction.is_empty() {
             continue;
@@ -272,7 +286,7 @@ pub fn parse_airr_tsv(
             interned_junctions.get_or_make_id(unsafe { str::from_utf8_unchecked(junction) })?;
 
         let repertoire = record
-            .get(col_indices.rprt)
+            .get(col_indices.repertoire)
             .expect("idx should not be out of range");
         if repertoire.is_empty() {
             continue;
@@ -286,7 +300,7 @@ pub fn parse_airr_tsv(
         let repertoire_id = interned_repertoires.get_or_make_id(repertoire)?;
 
         let duplicate_count = record
-            .get(col_indices.dpct)
+            .get(col_indices.duplicate_count)
             .expect("idx should not be out of range");
         if duplicate_count.is_empty() {
             continue;
@@ -325,31 +339,38 @@ mod tests {
     use super::*;
 
     static MOCK_AIRR_TSV: &[u8] = include_bytes!("../../test_files/mock_airr.tsv");
+    static MOCK_AIRR_CUSTOM_COLS: &[u8] =
+        include_bytes!("../../test_files/mock_airr_custom_cols.tsv");
 
     #[test]
     fn test_col_indices() {
         let mut reader = ReaderBuilder::new()
             .delimiter(b'\t')
             .from_reader(MOCK_AIRR_TSV);
-        let col_indices = ColIndices::try_from(&mut reader, false).unwrap();
+        let col_indices = ColIndices::try_from(&mut reader, None, None, None).unwrap();
 
-        assert_eq!(col_indices.jctn, 0);
-        assert_eq!(col_indices.rprt, 2);
+        assert_eq!(col_indices.junction, 0);
+        assert_eq!(col_indices.duplicate_count, 1);
+        assert_eq!(col_indices.repertoire, 2);
     }
 
     #[test]
-    fn test_use_cdr3_col() {
+    fn test_custom_cols() {
         let mut reader = ReaderBuilder::new()
             .delimiter(b'\t')
-            .from_reader(MOCK_AIRR_TSV);
-        let result = ColIndices::try_from(&mut reader, true);
+            .from_reader(MOCK_AIRR_CUSTOM_COLS);
+        let col_indices = ColIndices::try_from(&mut reader, Some("foo"), Some("bar"), Some("baz"))
+            .expect("custom columns should be named correctly");
 
-        assert!(result.is_err());
+        assert_eq!(col_indices.junction, 0);
+        assert_eq!(col_indices.duplicate_count, 1);
+        assert_eq!(col_indices.repertoire, 2);
     }
 
     #[test]
     fn test_parse_tsv() {
-        let parsed = parse_airr_tsv(MOCK_AIRR_TSV, false, None).expect("should parse valid tsv");
+        let parsed =
+            parse_airr_tsv(MOCK_AIRR_TSV, None, None, None, None).expect("should parse valid tsv");
 
         assert_eq!(parsed.interned_junctions.len(), 9);
         assert_eq!(parsed.interned_repertoires.len(), 2);

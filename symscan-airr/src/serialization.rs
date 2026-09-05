@@ -81,8 +81,8 @@ mod tests {
 
     #[test]
     fn test_om_as_triplet_tsv_ut() {
-        let parsed =
-            parsing::parse_airr_tsv(MOCK_AIRR_TSV, false, None).expect("should parse valid tsv");
+        let parsed = parsing::parse_airr_tsv(MOCK_AIRR_TSV, None, None, None, None)
+            .expect("should parse valid tsv");
         let ovl_mat = analysis::compute_overlap_matrix_within(&parsed, 2, false)
             .expect("should not be any symscan errors");
         let mut output = Vec::new();

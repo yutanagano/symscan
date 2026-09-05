@@ -42,15 +42,29 @@ struct Args {
     #[arg(long, action = ArgAction::SetTrue)]
     hamming: bool,
 
-    /// Use the amino acid sequence from the cdr3_aa column.
-    ///
-    /// By default, the program uses the junction_aa column.
-    #[arg(long, action = ArgAction::SetTrue)]
-    cdr3: bool,
+    /// The column name to use to get junction sequence data from the input (will use "junction_aa"
+    /// if not set).
+    #[arg(long)]
+    junction_col: Option<String>,
 
-    /// The number of OS threads the program spawns for computations (if 0 spawns one thread per CPU core).
-    #[arg(short, long, default_value_t = 0)]
-    num_threads: usize,
+    /// The column name to use to get the duplicate count for each AIR from the input (will use
+    /// "duplicate_count" if not set).
+    #[arg(long)]
+    count_col: Option<String>,
+
+    /// The column name to use to get repertoire name data from the input (will use "repertoire_id"
+    /// if not set).
+    #[arg(long)]
+    repertoire_col: Option<String>,
+
+    /// The separator character used in the input data (will use tab character '\t' if not set).
+    #[arg(short, long)]
+    sep: Option<char>,
+
+    /// The number of OS threads the program spawns for computations (spawns one thread per CPU core
+    /// if not set).
+    #[arg(short, long)]
+    num_threads: Option<usize>,
 
     /// Path to input AIRR-compliant TSV (if absent program reads from stdin until EOF).
     file_query: Option<String>,
@@ -80,25 +94,22 @@ enum Error {
     Io(#[from] io::Error),
 }
 
-struct FileReaderWithSizeHint {
-    reader: BufReader<File>,
-    num_rows_hint: Option<u32>,
-}
-
 fn main() -> Result<(), Error> {
     let args = Args::parse();
 
     ThreadPoolBuilder::new()
-        .num_threads(args.num_threads)
+        .num_threads(args.num_threads.unwrap_or(0))
         .build_global()?;
 
-    let data_query = match args.file_query.as_ref() {
+    let data_query = match args.file_query.as_deref() {
         Some(path) => {
-            let reader_with_hint = get_file_reader_with_size_hint(path)?;
+            let (reader, num_rows_hint) = get_file_reader_with_size_hint(path)?;
             parsing::parse_airr_tsv(
-                reader_with_hint.reader,
-                args.cdr3,
-                reader_with_hint.num_rows_hint,
+                reader,
+                num_rows_hint,
+                args.junction_col.as_deref(),
+                args.count_col.as_deref(),
+                args.repertoire_col.as_deref(),
             )
             .map_err(|e| Error::Parsing {
                 input_name: path.to_string(),
@@ -107,27 +118,39 @@ fn main() -> Result<(), Error> {
         }
         None => {
             let stdin = io::stdin().lock();
-            parsing::parse_airr_tsv(stdin, args.cdr3, None).map_err(|e| Error::Parsing {
+            parsing::parse_airr_tsv(
+                stdin,
+                None,
+                args.junction_col.as_deref(),
+                args.count_col.as_deref(),
+                args.repertoire_col.as_deref(),
+            )
+            .map_err(|e| Error::Parsing {
                 input_name: "stdin".to_string(),
                 error: e,
             })?
         }
     };
 
-    if let Some(ref_path) = &args.file_reference {
+    if let Some(ref_path) = args.file_reference.as_deref() {
         if ref_path
             != args
                 .file_query
                 .as_ref()
                 .expect("query file must be specified if reference file is specified")
         {
-            let reader_ref = get_file_reader_with_size_hint(ref_path)?;
-            let data_ref =
-                parsing::parse_airr_tsv(reader_ref.reader, args.cdr3, reader_ref.num_rows_hint)
-                    .map_err(|e| Error::Parsing {
-                        input_name: ref_path.to_string(),
-                        error: e,
-                    })?;
+            let (reader, num_rows_hint) = get_file_reader_with_size_hint(ref_path)?;
+            let data_ref = parsing::parse_airr_tsv(
+                reader,
+                num_rows_hint,
+                args.junction_col.as_deref(),
+                args.count_col.as_deref(),
+                args.repertoire_col.as_deref(),
+            )
+            .map_err(|e| Error::Parsing {
+                input_name: ref_path.to_string(),
+                error: e,
+            })?;
 
             return run_analysis_across(&data_query, &data_ref, &args);
         }
@@ -165,16 +188,13 @@ fn run_analysis_across(
 }
 
 /// Get a buffered reader to a file at path, with a hint on the number of rows.
-fn get_file_reader_with_size_hint(path: &str) -> io::Result<FileReaderWithSizeHint> {
+fn get_file_reader_with_size_hint(path: &str) -> io::Result<(BufReader<File>, Option<u32>)> {
     let file = File::open(path)?;
     let num_bytes_in_file = file.metadata().ok().map(|m| m.len());
     let mut reader = BufReader::with_capacity(1 << 16, file);
     let num_rows_hint = get_num_rows_hint(&mut reader, num_bytes_in_file)?;
 
-    Ok(FileReaderWithSizeHint {
-        reader,
-        num_rows_hint,
-    })
+    Ok((reader, num_rows_hint))
 }
 
 fn get_num_rows_hint(

@@ -272,8 +272,8 @@ mod tests {
 
     #[test]
     fn test_compute_overlap_matrix() {
-        let parsed =
-            parsing::parse_airr_tsv(MOCK_AIRR_TSV, false, None).expect("should parse valid tsv");
+        let parsed = parsing::parse_airr_tsv(MOCK_AIRR_TSV, None, None, None, None)
+            .expect("should parse valid tsv");
         let ovl_mat = compute_overlap_matrix_within(&parsed, 2, false)
             .expect("should not be any symscan errors");
 
