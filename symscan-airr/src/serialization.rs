@@ -75,13 +75,13 @@ pub fn om_as_triplet_tsv_upper(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{analysis, parsing};
+    use crate::{analysis, parsing, ParsingOpts};
 
     static MOCK_AIRR_TSV: &[u8] = include_bytes!("../../test_files/mock_airr.tsv");
 
     #[test]
     fn test_om_as_triplet_tsv_ut() {
-        let parsed = parsing::parse_airr_tsv(MOCK_AIRR_TSV, None, None, None, None)
+        let parsed = parsing::parse_airr_tsv(MOCK_AIRR_TSV, None, &ParsingOpts::default())
             .expect("should parse valid tsv");
         let ovl_mat = analysis::compute_overlap_matrix_within(&parsed, 2, false)
             .expect("should not be any symscan errors");

@@ -266,13 +266,13 @@ pub fn compute_overlap_matrix_across(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parsing;
+    use crate::{parsing, ParsingOpts};
 
     static MOCK_AIRR_TSV: &[u8] = include_bytes!("../../test_files/mock_airr.tsv");
 
     #[test]
     fn test_compute_overlap_matrix() {
-        let parsed = parsing::parse_airr_tsv(MOCK_AIRR_TSV, None, None, None, None)
+        let parsed = parsing::parse_airr_tsv(MOCK_AIRR_TSV, None, &ParsingOpts::default())
             .expect("should parse valid tsv");
         let ovl_mat = compute_overlap_matrix_within(&parsed, 2, false)
             .expect("should not be any symscan errors");

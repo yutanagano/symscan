@@ -1,4 +1,5 @@
 use std::{
+    char::TryFromCharError,
     hash::BuildHasher,
     io::{BufRead, Read},
 };
@@ -7,12 +8,16 @@ use csv::{ByteRecord, Reader, ReaderBuilder};
 use foldhash::fast::FixedState;
 use hashbrown::{hash_table::Entry, HashMap, HashTable};
 
+use crate::ParsingOpts;
+
 const STRING_HASHER: FixedState = FixedState::with_seed(0);
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("file separator must be ASCII: {0}")]
+    TryFromChar(#[from] TryFromCharError),
     #[error("{0}")]
-    InvalidCsv(csv::Error),
+    InvalidCsv(#[from] csv::Error),
     #[error("missing column {0}")]
     MissingColumn(String),
     #[error("non-ASCII junction on line {line}")]
@@ -193,18 +198,14 @@ pub struct DupCountEntry {
 
 struct ColIndices {
     junction: usize,
-    repertoire: usize,
     duplicate_count: usize,
+    repertoire: usize,
+    locus: Option<usize>,
 }
 
 impl ColIndices {
-    fn try_from(
-        tsv: &mut Reader<impl Read>,
-        custom_junction_col: Option<&str>,
-        custom_count_col: Option<&str>,
-        custom_repertoire_col: Option<&str>,
-    ) -> Result<Self, Error> {
-        let headers = tsv.headers().map_err(Error::InvalidCsv)?;
+    fn try_from(tsv: &mut Reader<impl Read>, opts: &ParsingOpts) -> Result<Self, Error> {
+        let headers = tsv.headers()?;
 
         let get_col_index = |colname: &str| {
             headers
@@ -212,14 +213,20 @@ impl ColIndices {
                 .position(|h| h == colname)
                 .ok_or(Error::MissingColumn(colname.to_string()))
         };
-        let jctn = get_col_index(custom_junction_col.unwrap_or("junction_aa"))?;
-        let dpct = get_col_index(custom_count_col.unwrap_or("duplicate_count"))?;
-        let rprt = get_col_index(custom_repertoire_col.unwrap_or("repertoire_id"))?;
+        let junction = get_col_index(&opts.junction_col)?;
+        let duplicate_count = get_col_index(&opts.count_col)?;
+        let repertoire = get_col_index(&opts.repertoire_col)?;
+        let locus = if opts.locus.is_some() {
+            Some(get_col_index(&opts.locus_col)?)
+        } else {
+            None
+        };
 
         Ok(Self {
-            junction: jctn,
-            repertoire: rprt,
-            duplicate_count: dpct,
+            junction,
+            duplicate_count,
+            repertoire,
+            locus,
         })
     }
 }
@@ -242,28 +249,34 @@ impl ColIndices {
 pub fn parse_airr_tsv(
     in_stream: impl BufRead,
     num_rows_hint: Option<u32>,
-    custom_junction_col: Option<&str>,
-    custom_count_col: Option<&str>,
-    custom_repertoire_col: Option<&str>,
+    parsing_opts: &ParsingOpts,
 ) -> Result<AirrData, Error> {
-    let mut tsv_reader = ReaderBuilder::new().delimiter(b'\t').from_reader(in_stream);
+    let mut tsv_reader = ReaderBuilder::new()
+        .delimiter(parsing_opts.sep.try_into()?)
+        .from_reader(in_stream);
 
     let size_hint = num_rows_hint.unwrap_or(0) as usize;
     let mut interned_junctions = InternedStrings::with_capacity(size_hint);
     let mut interned_repertoires = InternedStrings::with_capacity(0);
     let mut dup_count_coo: HashMap<PackedSeqId, u32> = HashMap::with_capacity(size_hint);
 
-    let col_indices = ColIndices::try_from(
-        &mut tsv_reader,
-        custom_junction_col,
-        custom_count_col,
-        custom_repertoire_col,
-    )?;
+    let col_indices = ColIndices::try_from(&mut tsv_reader, parsing_opts)?;
     let mut record = ByteRecord::new();
-    while tsv_reader
-        .read_byte_record(&mut record)
-        .map_err(Error::InvalidCsv)?
-    {
+    while tsv_reader.read_byte_record(&mut record)? {
+        // If locus is set, ignore records with unmatching loci
+        if let Some(target_locus) = parsing_opts.locus.as_deref() {
+            let record_locus = record
+                .get(
+                    col_indices
+                        .locus
+                        .expect("locus column should not be None if locus is set"),
+                )
+                .expect("idx should not be out of range");
+            if record_locus != target_locus.as_bytes() {
+                continue;
+            }
+        }
+
         // If for any record the junction, repertoire, or duplicate count are missing, skip the
         // record since we don't have enough information.
 
@@ -341,13 +354,14 @@ mod tests {
     static MOCK_AIRR_TSV: &[u8] = include_bytes!("../../test_files/mock_airr.tsv");
     static MOCK_AIRR_CUSTOM_COLS: &[u8] =
         include_bytes!("../../test_files/mock_airr_custom_cols.tsv");
+    static MOCK_AIRR_CSV: &[u8] = include_bytes!("../../test_files/mock_airr.csv");
 
     #[test]
     fn test_col_indices() {
         let mut reader = ReaderBuilder::new()
             .delimiter(b'\t')
             .from_reader(MOCK_AIRR_TSV);
-        let col_indices = ColIndices::try_from(&mut reader, None, None, None).unwrap();
+        let col_indices = ColIndices::try_from(&mut reader, &ParsingOpts::default()).unwrap();
 
         assert_eq!(col_indices.junction, 0);
         assert_eq!(col_indices.duplicate_count, 1);
@@ -359,7 +373,12 @@ mod tests {
         let mut reader = ReaderBuilder::new()
             .delimiter(b'\t')
             .from_reader(MOCK_AIRR_CUSTOM_COLS);
-        let col_indices = ColIndices::try_from(&mut reader, Some("foo"), Some("bar"), Some("baz"))
+        let mut opts = ParsingOpts::default();
+        opts.junction_col = "foo".to_string();
+        opts.count_col = "bar".to_string();
+        opts.repertoire_col = "baz".to_string();
+
+        let col_indices = ColIndices::try_from(&mut reader, &opts)
             .expect("custom columns should be named correctly");
 
         assert_eq!(col_indices.junction, 0);
@@ -369,8 +388,8 @@ mod tests {
 
     #[test]
     fn test_parse_tsv() {
-        let parsed =
-            parse_airr_tsv(MOCK_AIRR_TSV, None, None, None, None).expect("should parse valid tsv");
+        let parsed = parse_airr_tsv(MOCK_AIRR_TSV, None, &ParsingOpts::default())
+            .expect("should parse valid tsv");
 
         assert_eq!(parsed.interned_junctions.len(), 9);
         assert_eq!(parsed.interned_repertoires.len(), 2);
@@ -413,5 +432,16 @@ mod tests {
                 }
             ]
         );
+    }
+
+    #[test]
+    fn test_custom_sep() {
+        let mut opts = ParsingOpts::default();
+        opts.sep = ',';
+
+        let parsed = parse_airr_tsv(MOCK_AIRR_CSV, None, &opts).expect("should parse valid csv");
+
+        assert_eq!(parsed.interned_junctions.len(), 9);
+        assert_eq!(parsed.interned_repertoires.len(), 2);
     }
 }
