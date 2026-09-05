@@ -3,7 +3,7 @@ use std::{
     io::{BufRead, Read},
 };
 
-use csv::{Reader, ReaderBuilder, StringRecord};
+use csv::{ByteRecord, Reader, ReaderBuilder};
 use foldhash::fast::FixedState;
 use hashbrown::{hash_table::Entry, HashMap, HashTable};
 
@@ -15,8 +15,10 @@ pub enum Error {
     InvalidCsv(csv::Error),
     #[error("missing column {0}")]
     MissingColumn(String),
-    #[error("non-ASCII junction {seq} on line {line}")]
-    JunctionNotAscii { line: u64, seq: String },
+    #[error("non-ASCII junction on line {line}")]
+    JunctionNotAscii { line: u64 },
+    #[error("non-UTF8 bytes on line {line}")]
+    ValueNotUtf8 { line: u64 },
     #[error("invalid duplicate_count {val} on line {line}")]
     InvalidDuplicateCount { line: u64, val: String },
     #[error("string interner has reached maximum capacity ({}), please try again with a smaller input size", u32::MAX)]
@@ -233,8 +235,11 @@ pub fn parse_airr_tsv(in_stream: impl BufRead, use_cdr3_col: bool) -> Result<Air
     let mut dup_count_coo: HashMap<PackedSeqId, u32> = HashMap::new();
 
     let col_indices = ColIndices::try_from(&mut reader, use_cdr3_col)?;
-    let mut record = StringRecord::new();
-    while reader.read_record(&mut record).map_err(Error::InvalidCsv)? {
+    let mut record = ByteRecord::new();
+    while reader
+        .read_byte_record(&mut record)
+        .map_err(Error::InvalidCsv)?
+    {
         // If for any record the junction, repertoire, or duplicate count are missing, skip the
         // record since we don't have enough information.
 
@@ -250,10 +255,11 @@ pub fn parse_airr_tsv(in_stream: impl BufRead, use_cdr3_col: bool) -> Result<Air
                     .position()
                     .expect("record should have position set on read")
                     .line(),
-                seq: junction.to_string(),
             });
         }
-        let junction_id = interned_junctions.get_or_make_id(junction)?;
+        // Already checked junction is ASCII above
+        let junction_id =
+            interned_junctions.get_or_make_id(unsafe { str::from_utf8_unchecked(junction) })?;
 
         let repertoire = record
             .get(col_indices.rprt)
@@ -261,6 +267,12 @@ pub fn parse_airr_tsv(in_stream: impl BufRead, use_cdr3_col: bool) -> Result<Air
         if repertoire.is_empty() {
             continue;
         }
+        let repertoire = str::from_utf8(repertoire).map_err(|_| Error::ValueNotUtf8 {
+            line: record
+                .position()
+                .expect("record should have position set on read")
+                .line(),
+        })?;
         let repertoire_id = interned_repertoires.get_or_make_id(repertoire)?;
 
         let duplicate_count = record
@@ -269,6 +281,12 @@ pub fn parse_airr_tsv(in_stream: impl BufRead, use_cdr3_col: bool) -> Result<Air
         if duplicate_count.is_empty() {
             continue;
         }
+        let duplicate_count = str::from_utf8(duplicate_count).map_err(|_| Error::ValueNotUtf8 {
+            line: record
+                .position()
+                .expect("record should have position set on read")
+                .line(),
+        })?;
         let Ok(duplicate_count) = duplicate_count.parse::<u32>() else {
             return Err(Error::InvalidDuplicateCount {
                 line: record
