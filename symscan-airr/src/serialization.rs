@@ -17,8 +17,8 @@ pub fn om_as_triplet_tsv_full(
     context_ref: &AirrData,
     writer: &mut impl Write,
 ) -> io::Result<()> {
-    let mut repnames_query = context_query.interned_repertoires.uniques().to_vec();
-    let mut repnames_ref = context_ref.interned_repertoires.uniques().to_vec();
+    let mut repnames_query: Vec<&str> = context_query.interned_repertoires.iter().collect();
+    let mut repnames_ref: Vec<&str> = context_ref.interned_repertoires.iter().collect();
     repnames_query.sort_unstable();
     repnames_ref.sort_unstable();
 
@@ -48,10 +48,10 @@ pub fn om_as_triplet_tsv_upper(
     context: &AirrData,
     writer: &mut impl Write,
 ) -> io::Result<()> {
-    let mut repertoire_names = context.interned_repertoires.uniques().to_vec();
-    repertoire_names.sort_unstable();
+    let mut repnames: Vec<&str> = context.interned_repertoires.iter().collect();
+    repnames.sort_unstable();
 
-    for (repname_1, repname_2) in repertoire_names
+    for (repname_1, repname_2) in repnames
         .iter()
         .combinations_with_replacement(2)
         .map(|p| (p[0], p[1]))

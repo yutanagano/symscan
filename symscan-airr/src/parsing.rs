@@ -1,10 +1,13 @@
 use std::{
+    hash::BuildHasher,
     io::{BufRead, Read},
-    sync::Arc,
 };
 
 use csv::{Reader, ReaderBuilder, StringRecord};
-use hashbrown::HashMap;
+use foldhash::fast::FixedState;
+use hashbrown::{hash_table::Entry, HashMap, HashTable};
+
+const STRING_HASHER: FixedState = FixedState::with_seed(0);
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -29,45 +32,78 @@ pub struct AirrData {
 
 /// A struct for interning strings.
 pub struct InternedStrings {
-    uniques: Vec<Arc<str>>,
-    ids: HashMap<Arc<str>, u32>,
+    /// Contiguous buffer array that stores the backing memory for the interned strings.
+    buffer: Vec<u8>,
+
+    /// Location of each interned string's data on the buffer vector.
+    ///
+    /// Has length N+1 where N is the number of unique interned strings. The memory for the kth
+    /// string is stored in buffer[offsets[k]..offsets[k+1]].
+    offsets: Vec<usize>,
+
+    /// Used to map strings to their IDs.
+    ids: HashTable<u32>,
 }
 
 impl InternedStrings {
     fn new() -> Self {
         Self {
-            uniques: Vec::new(),
-            ids: HashMap::new(),
+            buffer: Vec::new(),
+            offsets: vec![0],
+            ids: HashTable::new(),
         }
     }
 
     /// The number of unique interned strings.
     pub fn len(&self) -> usize {
-        self.uniques.len()
+        self.offsets.len() - 1
     }
 
     /// The set of unique interned strings.
-    pub fn uniques(&self) -> &[Arc<str>] {
-        &self.uniques
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        (0..self.len() as u32).map(|id| self.str_at(id))
     }
 
     pub fn get_id(&self, s: &str) -> Option<u32> {
-        self.ids.get(s).copied()
+        let hash = STRING_HASHER.hash_one(s);
+        self.ids.find(hash, |&id| self.str_at(id) == s).copied()
+    }
+
+    fn str_at(&self, id: u32) -> &str {
+        let i_start = self.offsets[id as usize];
+        let i_end = self.offsets[id as usize + 1];
+        unsafe { str::from_utf8_unchecked(&self.buffer[i_start..i_end]) }
     }
 
     /// Given a string, either get its ID if already assigned, and otherwise assign one and return.
     fn get_or_make_id(&mut self, s: &str) -> Result<u32, Error> {
-        if let Some(&id) = self.ids.get(s) {
-            return Ok(id);
+        let hash = STRING_HASHER.hash_one(s);
+
+        let Self {
+            buffer,
+            offsets,
+            ids,
+        } = self;
+        let str_at = |id: u32| {
+            let i_start = offsets[id as usize];
+            let i_end = offsets[id as usize + 1];
+            unsafe { str::from_utf8_unchecked(&buffer[i_start..i_end]) }
+        };
+
+        match ids.entry(
+            hash,
+            |&id| str_at(id) == s,
+            |&id| STRING_HASHER.hash_one(str_at(id)),
+        ) {
+            Entry::Occupied(e) => Ok(*e.get()),
+            Entry::Vacant(e) => {
+                let id = u32::try_from(offsets.len() - 1).map_err(|_| Error::OverCapacity)?;
+                buffer.extend_from_slice(s.as_bytes());
+                offsets.push(buffer.len());
+                e.insert(id);
+                Ok(id)
+            }
         }
-
-        let id = u32::try_from(self.uniques.len()).map_err(|_| Error::OverCapacity)?;
-
-        let key: Arc<str> = s.into();
-        self.uniques.push(key.clone());
-        self.ids.insert(key, id);
-
-        Ok(id)
     }
 }
 

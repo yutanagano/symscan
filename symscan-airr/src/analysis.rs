@@ -109,11 +109,10 @@ pub fn compute_overlap_matrix_within(
     max_distance: u8,
     hamming: bool,
 ) -> Result<SymmetricMatrix<u64>, symscan::Error> {
+    let junction_seqs: Vec<&str> = data.interned_junctions.iter().collect();
     let neighbor_pairs = match hamming {
-        true => {
-            symscan::get_hamming_neighbors_within(data.interned_junctions.uniques(), max_distance)
-        }
-        false => symscan::get_neighbors_within(data.interned_junctions.uniques(), max_distance),
+        true => symscan::get_hamming_neighbors_within(&junction_seqs, max_distance),
+        false => symscan::get_neighbors_within(&junction_seqs, max_distance),
     }?;
 
     let mut ovl_mat = SymmetricMatrix::new(data.interned_repertoires.len());
@@ -162,17 +161,11 @@ pub fn compute_overlap_matrix_across(
     max_distance: u8,
     hamming: bool,
 ) -> Result<DenseMatrix<u64>, symscan::Error> {
+    let seqs_query: Vec<&str> = data_query.interned_junctions.iter().collect();
+    let seqs_ref: Vec<&str> = data_ref.interned_junctions.iter().collect();
     let neighbor_pairs = match hamming {
-        true => symscan::get_hamming_neighbors_across(
-            data_query.interned_junctions.uniques(),
-            data_ref.interned_junctions.uniques(),
-            max_distance,
-        ),
-        false => symscan::get_neighbors_across(
-            data_query.interned_junctions.uniques(),
-            data_ref.interned_junctions.uniques(),
-            max_distance,
-        ),
+        true => symscan::get_hamming_neighbors_across(&seqs_query, &seqs_ref, max_distance),
+        false => symscan::get_neighbors_across(&seqs_query, &seqs_ref, max_distance),
     }?;
 
     let mut ovl_mat = DenseMatrix::new(

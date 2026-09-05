@@ -793,6 +793,7 @@ version = "0.8.3"
 dependencies = [
  "clap",
  "csv",
+ "foldhash",
  "hashbrown",
  "itertools 0.15.0",
  "rayon",
