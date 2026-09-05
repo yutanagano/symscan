@@ -2,8 +2,7 @@
 // TODO: support using V/J calls
 
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter};
-use std::process;
+use std::io::{self, BufRead, BufReader, BufWriter};
 
 use clap::{ArgAction, Parser};
 use rayon::ThreadPoolBuilder;
@@ -81,6 +80,11 @@ enum Error {
     Io(#[from] io::Error),
 }
 
+struct FileReaderWithSizeHint {
+    reader: BufReader<File>,
+    num_rows_hint: Option<u32>,
+}
+
 fn main() -> Result<(), Error> {
     let args = Args::parse();
 
@@ -90,15 +94,20 @@ fn main() -> Result<(), Error> {
 
     let data_query = match args.file_query.as_ref() {
         Some(path) => {
-            let reader = get_file_bufreader(path);
-            parsing::parse_airr_tsv(reader, args.cdr3).map_err(|e| Error::Parsing {
+            let reader_with_hint = get_file_reader_with_size_hint(path)?;
+            parsing::parse_airr_tsv(
+                reader_with_hint.reader,
+                args.cdr3,
+                reader_with_hint.num_rows_hint,
+            )
+            .map_err(|e| Error::Parsing {
                 input_name: path.to_string(),
                 error: e,
             })?
         }
         None => {
             let stdin = io::stdin().lock();
-            parsing::parse_airr_tsv(stdin, args.cdr3).map_err(|e| Error::Parsing {
+            parsing::parse_airr_tsv(stdin, args.cdr3, None).map_err(|e| Error::Parsing {
                 input_name: "stdin".to_string(),
                 error: e,
             })?
@@ -112,12 +121,13 @@ fn main() -> Result<(), Error> {
                 .as_ref()
                 .expect("query file must be specified if reference file is specified")
         {
-            let ref_reader = get_file_bufreader(ref_path);
+            let reader_ref = get_file_reader_with_size_hint(ref_path)?;
             let data_ref =
-                parsing::parse_airr_tsv(ref_reader, args.cdr3).map_err(|e| Error::Parsing {
-                    input_name: ref_path.to_string(),
-                    error: e,
-                })?;
+                parsing::parse_airr_tsv(reader_ref.reader, args.cdr3, reader_ref.num_rows_hint)
+                    .map_err(|e| Error::Parsing {
+                        input_name: ref_path.to_string(),
+                        error: e,
+                    })?;
 
             return run_analysis_across(&data_query, &data_ref, &args);
         }
@@ -154,11 +164,42 @@ fn run_analysis_across(
     Ok(())
 }
 
-/// Get a buffered reader to a file at path.
-fn get_file_bufreader(path: &str) -> BufReader<File> {
-    let file = File::open(path).unwrap_or_else(|e| {
-        eprintln!("failed to open {}: {}", path, e);
-        process::exit(1)
-    });
-    BufReader::new(file)
+/// Get a buffered reader to a file at path, with a hint on the number of rows.
+fn get_file_reader_with_size_hint(path: &str) -> io::Result<FileReaderWithSizeHint> {
+    let file = File::open(path)?;
+    let num_bytes_in_file = file.metadata().ok().map(|m| m.len());
+    let mut reader = BufReader::with_capacity(1 << 16, file);
+    let num_rows_hint = get_num_rows_hint(&mut reader, num_bytes_in_file)?;
+
+    Ok(FileReaderWithSizeHint {
+        reader,
+        num_rows_hint,
+    })
+}
+
+fn get_num_rows_hint(
+    reader: &mut BufReader<File>,
+    num_bytes_in_file: Option<u64>,
+) -> io::Result<Option<u32>> {
+    match num_bytes_in_file {
+        None => Ok(None),
+        Some(num_bytes_in_file) => {
+            let buf = reader.fill_buf()?;
+
+            let Some(last_nl_pos) = buf.iter().rposition(|&b| b == b'\n') else {
+                return Ok(None);
+            };
+            let buf = &buf[0..=last_nl_pos];
+
+            let num_lines_in_preview = buf.iter().filter(|&&b| b == b'\n').count();
+            if num_lines_in_preview == 0 {
+                return Ok(None);
+            }
+
+            let bytes_per_line = buf.len() as f64 / num_lines_in_preview as f64;
+            let estimate = num_bytes_in_file as f64 / bytes_per_line;
+
+            Ok(Some(estimate as u32))
+        }
+    }
 }

@@ -48,11 +48,16 @@ pub struct InternedStrings {
 }
 
 impl InternedStrings {
-    fn new() -> Self {
+    fn with_capacity(cap: usize) -> Self {
+        let buffer = Vec::with_capacity(cap.saturating_mul(20));
+        let mut offsets = Vec::with_capacity(cap + 1);
+        let ids = HashTable::with_capacity(cap);
+        offsets.push(0);
+
         Self {
-            buffer: Vec::new(),
-            offsets: vec![0],
-            ids: HashTable::new(),
+            buffer,
+            offsets,
+            ids,
         }
     }
 
@@ -227,16 +232,21 @@ impl ColIndices {
 /// duplicate-count matrix. The shape of the duplicate-count matrix should be n_unique_AIRs x n_reps
 /// (i.e. every row corresponds to a unique AIR sequence). Each row contains data representing the
 /// duplicate count of a unique sequence in each of the input repertoires.
-pub fn parse_airr_tsv(in_stream: impl BufRead, use_cdr3_col: bool) -> Result<AirrData, Error> {
-    let mut reader = ReaderBuilder::new().delimiter(b'\t').from_reader(in_stream);
+pub fn parse_airr_tsv(
+    in_stream: impl BufRead,
+    use_cdr3_col: bool,
+    num_rows_hint: Option<u32>,
+) -> Result<AirrData, Error> {
+    let mut tsv_reader = ReaderBuilder::new().delimiter(b'\t').from_reader(in_stream);
 
-    let mut interned_junctions = InternedStrings::new();
-    let mut interned_repertoires = InternedStrings::new();
-    let mut dup_count_coo: HashMap<PackedSeqId, u32> = HashMap::new();
+    let size_hint = num_rows_hint.unwrap_or(0) as usize;
+    let mut interned_junctions = InternedStrings::with_capacity(size_hint);
+    let mut interned_repertoires = InternedStrings::with_capacity(0);
+    let mut dup_count_coo: HashMap<PackedSeqId, u32> = HashMap::with_capacity(size_hint);
 
-    let col_indices = ColIndices::try_from(&mut reader, use_cdr3_col)?;
+    let col_indices = ColIndices::try_from(&mut tsv_reader, use_cdr3_col)?;
     let mut record = ByteRecord::new();
-    while reader
+    while tsv_reader
         .read_byte_record(&mut record)
         .map_err(Error::InvalidCsv)?
     {
@@ -339,7 +349,7 @@ mod tests {
 
     #[test]
     fn test_parse_tsv() {
-        let parsed = parse_airr_tsv(MOCK_AIRR_TSV, false).expect("should parse valid tsv");
+        let parsed = parse_airr_tsv(MOCK_AIRR_TSV, false, None).expect("should parse valid tsv");
 
         assert_eq!(parsed.interned_junctions.len(), 9);
         assert_eq!(parsed.interned_repertoires.len(), 2);
