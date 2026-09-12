@@ -235,8 +235,9 @@ impl Span {
 /// string pairs _**ARE NOT**_ double-counted. As seen in the
 /// [examples](get_neighbors_within#examples), each pair is represented once where the
 /// [`row`](NeighborPairs::row) index is always less than the [`col`](NeighborPairs::col) index. In
-/// other words, if you were to interpret the [`NeighborPairs`] in these situations as a sparse
-/// matrix, only the lower triangle will be filled.
+/// other words, if you were to interpret the [`NeighborPairs`] in these situations as an unpacked
+/// coordinate representation of a sparse matrix, then only the strictly upper triangle can be
+/// filled.
 #[derive(Debug, PartialEq)]
 pub struct NeighborPairs {
     /// Indices of strings in the input `query` slice that have neighbors.
