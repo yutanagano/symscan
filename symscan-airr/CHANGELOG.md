@@ -1,4 +1,4 @@
-## 0.1.0
+## symscan-airr 0.1.0
 
 - First release
 - Features:
