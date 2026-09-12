@@ -294,9 +294,9 @@ impl CachedRef {
 /// .. important::
 ///
 ///     This function **DOES NOT** double-count string pairs. As seen in the examples below, each
-///     pair is represented once where the `row` index is always less than the `col` index. In
-///     other words, if you were to interpret the output as a sparse matrix, only the lower
-///     triangle will be filled.
+///     pair is represented once where the `row` index is always less than the `col` index. In other
+///     words, if you were to interpret the output as an unpacked coordinate representation of a
+///     sparse matrix, then only the strictly upper triangle can be filled.
 ///
 /// Parameters
 /// ----------
