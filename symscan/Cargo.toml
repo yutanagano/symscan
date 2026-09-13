@@ -1,7 +1,7 @@
 [package]
 name = "symscan"
 authors = ["Yuta Nagano"]
-version.workspace = true
+version = "0.8.3"
 edition = "2021"
 description = "Fast discovery of similar strings in bulk"
 license = "MIT OR Apache-2.0"
