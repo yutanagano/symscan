@@ -4,6 +4,7 @@ authors = ["Yuta Nagano"]
 version = "0.8.3"
 edition = "2021"
 description = "Fast discovery of similar strings in bulk"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/yutanagano/symscan"
 homepage = "https://github.com/yutanagano/symscan"
 

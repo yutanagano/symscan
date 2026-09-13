@@ -4,6 +4,7 @@ authors = ["Yuta Nagano"]
 version = "0.1.0"
 edition = "2021"
 description = "Fast similarity measurement between adaptive immune receptor repertoire data, powered by symscan."
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/yutanagano/symscan"
 homepage = "https://github.com/yutanagano/symscan"
 
