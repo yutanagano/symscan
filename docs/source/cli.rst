@@ -8,6 +8,13 @@ Installation
 
    $ brew install yutanagano/tap/symscan-cli
 
+Or install from crates.io (useful on Windows and anywhere Homebrew is
+unavailable):
+
+.. code-block:: console
+
+   $ cargo install symscan-cli
+
 You can also directly download precompiled binaries from the project `releases
 page <https://github.com/yutanagano/symscan/releases>`_.
 

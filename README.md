@@ -31,12 +31,22 @@ faster for the above use case.
 brew install yutanagano/tap/symscan-cli
 ```
 
-Or install from source:
+Or install from crates.io:
 
 ```sh
-git clone https://github.com/yutanagano/symscan.git
-cd symscan
-cargo install --path symscan-cli
+cargo install symscan-cli
+```
+
+### AIRR CLI
+
+```sh
+brew install yutanagano/tap/symscan-airr
+```
+
+Or install from crates.io:
+
+```sh
+cargo install symscan-airr
 ```
 
 ### Rust library
@@ -69,6 +79,33 @@ $ echo $'fizz\nfuzz\nbuzz\nfizzy' | symscan
 See the [CLI docs](https://symscan.readthedocs.io/en/latest/cli.html) for
 options like `-d` (max distance), `-z` (0-indexed output), `--hamming`, and
 searching across two files.
+
+### AIRR CLI
+
+Given an AIRR-compliant TSV of rearrangements, `symscan-airr` reports
+duplicate-count-weighted overlap between repertoires:
+
+```sh
+$ cat > example.tsv <<'EOF'
+junction_aa	duplicate_count	repertoire_id
+CAVSTSGGSYIPTF	1	a
+CAVHASGGSYIPTF	1	a
+CAVSTSGGSYIPTF	1	b
+CAVRLSGGSYIPTF	2	b
+EOF
+$ symscan-airr example.tsv
+a	a	2
+a	b	1
+b	b	5
+$ < example.tsv symscan-airr
+a	a	2
+a	b	1
+b	b	5
+```
+
+See the [AIRR docs](https://symscan.readthedocs.io/en/latest/airr.html) for
+options like `-d`, `--hamming`, `--locus`, custom column names, and comparing
+repertoires across two files.
 
 ### Rust
 
