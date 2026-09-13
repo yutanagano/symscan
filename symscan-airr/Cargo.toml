@@ -8,11 +8,11 @@ repository = "https://github.com/yutanagano/symscan"
 homepage = "https://github.com/yutanagano/symscan"
 
 [dependencies]
-clap = { version = "4.5", features = ["derive"] }
-symscan = "0.8.3"
-rayon = "1.10"
+clap.workspace = true
 csv = "1.4.0"
-hashbrown = "0.16"
-thiserror = "2.0.20"
-itertools = "0.15.0"
-foldhash = "0.2.0"
+foldhash.workspace = true
+hashbrown.workspace = true
+itertools.workspace = true
+rayon.workspace = true
+symscan.workspace = true
+thiserror.workspace = true

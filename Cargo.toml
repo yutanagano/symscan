@@ -1,7 +1,15 @@
 [workspace]
 resolver = "3"
 members = ["symscan", "symscan-py", "symscan-cli", "symscan-airr"]
-package.version = "0.8.3"
+
+[workspace.dependencies]
+clap = { version = "4.5", features = ["derive"] }
+foldhash = "0.2.0"
+hashbrown = "0.16"
+itertools = "0.15.0"
+rayon = "1.10"
+symscan = { version = "0.8.3", path = "symscan" }
+thiserror = "2.0.20"
 
 [profile.release]
 strip = true
