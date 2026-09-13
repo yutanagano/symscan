@@ -788,19 +788,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "symscan"
-version = "0.8.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff2d9b3fb34379b0fd647cbfbd0c0822bf33621d96124fccdb5427254be68552"
-dependencies = [
- "foldhash",
- "hashbrown",
- "rapidfuzz",
- "rayon",
- "thiserror",
-]
-
-[[package]]
 name = "symscan-airr"
 version = "0.1.0"
 dependencies = [
@@ -810,7 +797,7 @@ dependencies = [
  "hashbrown",
  "itertools 0.15.0",
  "rayon",
- "symscan 0.8.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "symscan",
  "thiserror",
 ]
 
@@ -820,7 +807,7 @@ version = "0.8.3"
 dependencies = [
  "clap",
  "rayon",
- "symscan 0.8.3",
+ "symscan",
 ]
 
 [[package]]
@@ -829,7 +816,7 @@ version = "0.8.3"
 dependencies = [
  "numpy",
  "pyo3",
- "symscan 0.8.3",
+ "symscan",
 ]
 
 [[package]]
