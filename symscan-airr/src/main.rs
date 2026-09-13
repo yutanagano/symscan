@@ -25,7 +25,7 @@ mod serialization;
 /// overlap scores between repertoires across the two files. Repertoires from the same file will not
 /// be compared to one another.
 ///
-/// The output is a TSV where every row represets a pair of repertoires. The first two columns
+/// The output is a TSV where every row represents a pair of repertoires. The first two columns
 /// contain the names of two repertoires, and the third column contains the overlap quantity between
 /// them.
 #[derive(Debug, Parser)]
